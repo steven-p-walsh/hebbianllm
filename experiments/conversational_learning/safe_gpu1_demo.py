@@ -172,6 +172,11 @@ def main():
     
     start_init = time.time()
     learner = PlasticContinualLearner(config)
+    
+    # Try to load existing memory and network state
+    print("🔄 Loading previous memory and network state...")
+    learner.load_memory()
+    
     init_time = time.time() - start_init
     
     print(f"✅ Safe network initialized in {init_time:.1f}s")
@@ -184,17 +189,27 @@ def main():
     print(f"\n🎯 SAFE NETWORK READY:")
     print(f"   Neurons: {initial_stats['network_neurons']:,}")
     print(f"   Potential synapses: {total_synapses:,}")
-    print(f"   Initial active synapses: {initial_connections:,}")
-    print(f"   Initial connectivity: {initial_stats['connectivity']:.2%}")
+    print(f"   Active synapses: {initial_connections:,}")
+    print(f"   Connectivity: {initial_stats['connectivity']:.2%}")
+    print(f"   Previous interactions: {learner.total_interactions:,}")
+    print(f"   Previous conversations: {learner.conversation_count:,}")
+    print(f"   Vocabulary size: {initial_stats['vocabulary_size']:,}")
     print(f"   Memory usage: ~3GB on GPU 1")
     print()
     
-    # Start conversation
-    teacher_msg = learner.start_conversation()
-    print(f"👩‍🏫 Teacher: {teacher_msg}")
+    # Start or resume conversation
+    if learner.total_interactions == 0:
+        # Fresh start
+        teacher_msg = learner.start_conversation()
+        print(f"👩‍🏫 Teacher: {teacher_msg}")
+    else:
+        # Resume from previous session
+        print(f"🔄 Resuming from interaction {learner.total_interactions}")
+        teacher_msg = "Let's continue our conversation! What would you like to talk about?"
+        print(f"👩‍🏫 Teacher: {teacher_msg}")
     print()
     
-    turn = 0
+    turn = learner.total_interactions  # Start from current interaction count
     session_start_time = time.time()
     try:
         while True:  # Run until manually stopped
@@ -263,6 +278,16 @@ def main():
             if turn % 4 == 0:
                 print("🔬 Monitoring plasticity...")
                 learner._monitor_plasticity()
+            
+            # Save network state frequently
+            if turn % 100 == 0:
+                print("💾 Saving network state...")
+                learner._save_network_state()
+            
+            # Save memory periodically
+            if turn % 100 == 0:
+                print("💾 Saving memory...")
+                learner._save_memory()
             
             teacher_msg = teacher_feedback
             time.sleep(0.2)  # Brief pause

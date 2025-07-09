@@ -174,8 +174,8 @@ class PlasticContinualLearner:
         if self.total_interactions % self.config.network_save_interval == 0:
             self._save_network_state()
         
-        # Save progress periodically
-        if self.conversation_count % self.config.save_interval == 0:
+        # Save progress periodically based on interactions
+        if self.total_interactions % self.config.save_interval == 0:
             self._save_memory()
         
         self.logger.info(f"Input: {input_text}")
