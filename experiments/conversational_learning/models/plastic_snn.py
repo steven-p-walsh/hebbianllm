@@ -463,8 +463,22 @@ class PlasticHebSNN(HebSNN):
             next_tokens = self.token_mapper.decode_activity_to_tokens(result['activity'], top_k=10)
             
             if next_tokens:
-                # Sample from top tokens (with some randomness)
-                weights = jnp.array([1.0 / (i + 1) for i in range(len(next_tokens))])
+                # Create more balanced sampling weights that give PAUSE tokens a fair chance
+                # Use a gentler decay that doesn't heavily penalize later positions
+                weights = jnp.array([0.9 ** i for i in range(len(next_tokens))])
+                
+                # Give PAUSE tokens (ID 4) a significant boost if they're in the list
+                # This is important for natural speech generation with proper pauses
+                if 4 in next_tokens:
+                    pause_idx = next_tokens.index(4)
+                    # Give PAUSE tokens a much stronger boost to ensure they get selected
+                    weights = weights.at[pause_idx].set(weights[pause_idx] * 3.0)
+                
+                # Add a minimum weight floor to prevent any token from being too unlikely
+                min_weight = jnp.max(weights) * 0.1  # At least 10% of the max weight
+                weights = jnp.maximum(weights, min_weight)
+                
+                # Normalize weights
                 weights = weights / jnp.sum(weights)
                 
                 key = jax.random.PRNGKey(self.learning_step + len(generated))

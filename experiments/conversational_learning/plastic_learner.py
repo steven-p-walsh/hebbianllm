@@ -45,11 +45,11 @@ class PlasticLearnerConfig:
     teacher_temperature: float = 0.7
     
     # Memory and saving
-    save_interval: int = 20
-    network_save_interval: int = 10  # Save network state more frequently
-    memory_file: str = "experiments/conversational_learning/memory/plastic_memory.json"
-    network_file: str = "experiments/conversational_learning/memory/network_state.npz"
-    log_file: str = "experiments/conversational_learning/logs/plastic_learning.log"
+    save_interval: int = 5        # Save memory every 5 conversations (more frequent)
+    network_save_interval: int = 3  # Save network state every 3 interactions (more frequent)
+    memory_file: str = "memory/plastic_memory.json"     # Relative to current directory
+    network_file: str = "memory/network_state.npz"     # Relative to current directory
+    log_file: str = "logs/plastic_learning.log"        # Relative to current directory
 
 
 class PlasticContinualLearner:
@@ -255,12 +255,36 @@ class PlasticContinualLearner:
             else:
                 response_tokens = generated_tokens[-3:]  # Fallback
             
+            # Debug: Show what tokens were generated
+            token_names = []
+            for token_id in response_tokens:
+                if token_id in self.tokenizer.id_to_pattern:
+                    token_names.append(self.tokenizer.id_to_pattern[token_id])
+                else:
+                    token_names.append(f"<UNK:{token_id}>")
+            
+            print(f"🔍 Debug - Generated token IDs: {response_tokens}")
+            print(f"🔍 Debug - Token names: {token_names}")
+            
             # Decode response (keep PAUSE tokens to preserve spacing)
             response = self.tokenizer.decode(response_tokens, skip_special_tokens=False)
+            print(f"🔍 Debug - Raw decoded: '{response}'")
             
-            # Clean up the response but preserve spaces
+            # Clean up the response but preserve internal spaces
             response = response.replace('<BOS>', '').replace('<EOS>', '').replace('<UNK>', '')
-            response = response.strip()
+            
+            # Don't strip if response contains meaningful internal spaces
+            # Only strip if it's all whitespace or starts/ends with spaces but has content
+            if response.strip():  # If there's actual content
+                # Remove leading/trailing single spaces, but preserve internal spaces
+                response = response.strip()
+                # If response was just spaces, keep it as is (neural babbling)
+            
+            # Collapse multiple spaces to single spaces
+            import re
+            response = re.sub(r'\s+', ' ', response)
+            
+            print(f"🔍 Debug - Final response: '{response}'")
             
             # Debug info for sparse networks
             self.logger.debug(f"Generated tokens: {response_tokens}")

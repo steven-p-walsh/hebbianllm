@@ -164,8 +164,8 @@ def main():
         initial_connectivity=0.08,   # Reasonable connectivity for learning
         plasticity_rate=0.01,        # Moderate plasticity rate
         structural_plasticity=True,  # Allow rewiring
-        save_interval=50,            # Save memory every 50 conversations
-        network_save_interval=10     # Save network every 10 interactions
+        save_interval=5,             # Save memory every 5 conversations (more frequent)
+        network_save_interval=3      # Save network every 3 interactions (more frequent)
     )
     
     print("🧠 Initializing safe plastic network...")
