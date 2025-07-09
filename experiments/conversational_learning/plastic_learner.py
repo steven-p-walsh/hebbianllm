@@ -16,6 +16,7 @@ import time
 import json
 import logging
 import numpy as np
+import jax.numpy as jnp
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from dataclasses import dataclass, asdict
@@ -97,6 +98,19 @@ class PlasticContinualLearner:
         self.learned_associations = {}
         self.plasticity_events = []  # Track major plasticity changes
         
+        # Phase 2: Attention and novelty state
+        self.pattern_familiarity = {}  # Track pattern familiarity for novelty detection
+        self.attention_context = []    # Recent attended patterns
+        self.novelty_history = []      # Track novelty levels over time
+        
+        # Phase 3: Fatigue and STP state
+        self.sleep_cycle_counter = 0   # Track when to trigger sleep
+        self.fatigue_events = []       # Track fatigue buildup events
+        
+        # Phase 4: Sleep replay state
+        self.replay_events = []        # Track replay events during sleep
+        self.synaptic_capture_events = []  # Track synaptic capture events
+        
         # Conversation state
         self.current_conversation = []
         
@@ -170,6 +184,11 @@ class PlasticContinualLearner:
         if self.total_interactions % 5 == 0:
             self._monitor_plasticity()
         
+        # Phase 3: Check for sleep need every 10 interactions
+        self.sleep_cycle_counter += 1
+        if self.sleep_cycle_counter >= 10:
+            self._trigger_adenosine_sleep()
+        
         # Save network state more frequently
         if self.total_interactions % self.config.network_save_interval == 0:
             self._save_network_state()
@@ -186,7 +205,7 @@ class PlasticContinualLearner:
     
     def _learn_through_plasticity(self, text: str):
         """
-        Learn from text through synaptic plasticity, not network growth.
+        Learn from text through synaptic plasticity with Phase 2 neuromodulation.
         
         This is the key insight: real brains learn by changing connections,
         not by adding neurons.
@@ -195,8 +214,20 @@ class PlasticContinualLearner:
         token_ids = self.tokenizer.encode(text)
         
         if len(token_ids) > 0:
-            # Process through network with plasticity enabled
-            result = self.network.process_tokens(token_ids, learning=True)
+            # Phase 2: Compute attention and novelty
+            attention_level = self._compute_attention_level(text)
+            novelty_score = self._compute_novelty_score(text)
+            
+            # Set neuromodulators based on attention and novelty
+            self.network.modulators.set_mod('acetylcholine', attention_level)
+            self.network.modulators.set_mod('norepinephrine', novelty_score)
+            
+            # Process through network with Phase 2 neuromodulation
+            modulators = self.network.modulators.to_dict()
+            result = self.network.process_tokens(token_ids, learning=True, modulators=modulators)
+            
+            # Debug logging for Phase 2
+            self.logger.debug(f"Phase 2 - Attention: {attention_level:.2f}, Novelty: {novelty_score:.2f}")
             
             # Track plasticity event
             plasticity_stats = self.network.get_plasticity_stats()
@@ -207,6 +238,8 @@ class PlasticContinualLearner:
                     'step': self.total_interactions,
                     'text': text,
                     'stats': plasticity_stats,
+                    'attention': attention_level,
+                    'novelty': novelty_score,
                     'timestamp': time.time()
                 })
                 
@@ -309,51 +342,284 @@ class PlasticContinualLearner:
     
     def _learn_from_feedback_plastic(self, response: str, feedback: str):
         """
-        Learn from teacher feedback through plasticity adjustments.
+        Learn from teacher feedback through dopamine-gated plasticity.
         
-        Positive feedback strengthens recent synaptic changes.
-        Negative feedback weakens them.
+        Implements reward prediction error (RPE) signaling:
+        - Positive feedback: RPE = +1 (unexpected reward)
+        - Negative feedback: RPE = -1 (negative prediction error)  
+        - Neutral feedback: RPE = 0 (no prediction error)
         """
-        # Analyze feedback sentiment
-        positive_indicators = ["good", "great", "yes", "right", "nice", "excellent"]
-        negative_indicators = ["no", "try again", "not quite", "wrong"]
+        # Compute reward prediction error (RPE) from feedback
+        rpe = self._compute_rpe_from_feedback(feedback)
         
-        feedback_lower = feedback.lower()
-        is_positive = any(pos in feedback_lower for pos in positive_indicators)
-        is_negative = any(neg in feedback_lower for neg in negative_indicators)
+        # Set dopamine level based on RPE
+        self.network.modulators.set_mod('dopamine', rpe)
         
         # Encode feedback for plasticity
         feedback_tokens = self.tokenizer.encode(feedback)
         
         if feedback_tokens:
-            # Process feedback with plasticity modulation
-            if is_positive:
-                # Strengthen recent plasticity changes
-                self.network.plasticity.ltp_rate *= 1.1  # Boost learning rate temporarily
-                self.logger.debug("Positive feedback: boosting plasticity")
-            elif is_negative:
-                # Weaken recent changes
-                self.network.plasticity.ltd_rate *= 1.1  # Boost forgetting temporarily
-                self.logger.debug("Negative feedback: increasing forgetting")
+            # Process feedback through network with dopamine modulation
+            modulators = self.network.modulators.to_dict()
+            self.network.process_tokens(feedback_tokens, learning=True, modulators=modulators)
             
-            # Process feedback through network
-            self.network.process_tokens(feedback_tokens, learning=True)
-            
-            # Reset learning rates to baseline
-            self.network.plasticity.ltp_rate *= 0.99
-            self.network.plasticity.ltd_rate *= 0.99
+            self.logger.debug(f"RPE signal: {rpe:.2f}, Dopamine: {modulators['dopamine']:.2f}")
         
-        # Record association
+        # Decay dopamine over time (τ = 5 time steps)
+        self.network.modulators.decay_mod('dopamine', tau=5.0, dt=1.0)
+        
+        # Record association with RPE
         if response not in self.learned_associations:
             self.learned_associations[response] = []
         
         self.learned_associations[response].append({
             'feedback': feedback,
-            'positive': is_positive,
-            'negative': is_negative,
+            'rpe': rpe,
+            'positive': rpe > 0,
+            'negative': rpe < 0,
             'plasticity_step': self.network.learning_step,
             'timestamp': time.time()
         })
+    
+    def _compute_novelty_score(self, text: str) -> float:
+        """
+        Compute novelty score for text pattern.
+        
+        Returns:
+            Novelty score ∈ [0, 1]:
+            - 1.0: Completely novel pattern
+            - 0.5: Moderately familiar pattern
+            - 0.0: Very familiar pattern
+        """
+        # Create pattern signature from text
+        pattern_signature = self._create_pattern_signature(text)
+        
+        # Get current familiarity (defaults to 0 for new patterns)
+        current_familiarity = self.pattern_familiarity.get(pattern_signature, 0.0)
+        
+        # Update familiarity (exponential moving average)
+        α = 0.1  # Learning rate for familiarity
+        new_familiarity = current_familiarity + α * (1.0 - current_familiarity)
+        self.pattern_familiarity[pattern_signature] = new_familiarity
+        
+        # Novelty is inverse of familiarity
+        novelty = 1.0 - current_familiarity
+        
+        # Keep novelty history for attention computation
+        self.novelty_history.append(novelty)
+        if len(self.novelty_history) > 20:  # Keep recent history
+            self.novelty_history.pop(0)
+        
+        return novelty
+    
+    def _create_pattern_signature(self, text: str) -> str:
+        """Create a signature for pattern recognition."""
+        # Simple pattern signature: first few tokens + length
+        tokens = self.tokenizer.encode(text)[:5]  # First 5 tokens
+        return f"{len(tokens)}:{':'.join(map(str, tokens))}"
+    
+    def _compute_attention_level(self, context: str) -> float:
+        """
+        Compute attention level for current context.
+        
+        Returns:
+            Attention level ∈ [0, 1]:
+            - 1.0: High attention (important/relevant context)
+            - 0.5: Moderate attention 
+            - 0.0: Low attention (irrelevant context)
+        """
+        # Attention based on recent interaction quality and novelty
+        base_attention = 0.5  # Baseline attention
+        
+        # Boost attention for novel patterns
+        if self.novelty_history:
+            recent_novelty = np.mean(self.novelty_history[-3:])
+            novelty_boost = 0.3 * recent_novelty
+        else:
+            novelty_boost = 0.0
+        
+        # Boost attention for context containing question words (engagement)
+        question_words = ['what', 'why', 'how', 'where', 'when', 'who', '?']
+        engagement_boost = 0.2 if any(word in context.lower() for word in question_words) else 0.0
+        
+        # Boost attention for emotional context (important for learning)
+        emotional_words = ['good', 'bad', 'excellent', 'wrong', 'great', 'terrible']
+        emotional_boost = 0.2 if any(word in context.lower() for word in emotional_words) else 0.0
+        
+        # Combine attention factors
+        attention = base_attention + novelty_boost + engagement_boost + emotional_boost
+        
+        # Normalize to [0, 1] range
+        attention = np.clip(attention, 0.0, 1.0)
+        
+        return attention
+    
+    def _trigger_adenosine_sleep(self):
+        """
+        Trigger adenosine-clearing sleep when fatigue is high.
+        
+        This simulates the biological function of sleep in clearing adenosine
+        and consolidating memories through STP → LTP conversion.
+        """
+        # Check if sleep is needed
+        avg_fatigue = float(jnp.mean(self.network.neuron_fatigue))
+        
+        if avg_fatigue > 0.6:  # High fatigue threshold
+            self.logger.info(f"😴 Triggering adenosine-clearing sleep (fatigue: {avg_fatigue:.3f})")
+            
+            # Clear adenosine (fatigue recovery)
+            self.network.neuron_fatigue = self.network.neuron_fatigue * 0.1  # 90% clearance
+            
+            # Phase 4: Sleep replay of important experiences
+            replay_consolidation = self._perform_sleep_replay()
+            
+            # Phase 4: Synaptic capture - tagged synapses get preferential consolidation
+            self.network.synaptic_weights = self.network.plasticity.apply_synaptic_capture(
+                self.network.synaptic_weights, 
+                self.network.synaptic_tags, 
+                self.network.stp_buffer
+            )
+            
+            # Standard STP consolidation for untagged synapses
+            remaining_stp = self.network.stp_buffer * (1.0 - self.network.synaptic_tags)
+            stp_consolidation = remaining_stp * 0.3  # 30% of remaining STP becomes permanent
+            self.network.synaptic_weights = self.network.synaptic_weights + stp_consolidation
+            
+            # Reset STP buffer after consolidation
+            self.network.stp_buffer = self.network.stp_buffer * 0.2  # 80% clearance
+            
+            # Homeostatic scaling during sleep
+            self.network.synaptic_weights = self.network.synaptic_weights * 0.95  # Mild scaling
+            
+            # Reset sleep counter
+            self.sleep_cycle_counter = 0
+            
+            # Log sleep event
+            self.fatigue_events.append({
+                'step': self.total_interactions,
+                'event': 'adenosine_sleep',
+                'pre_fatigue': avg_fatigue,
+                'post_fatigue': float(jnp.mean(self.network.neuron_fatigue)),
+                'stp_consolidated': float(jnp.mean(jnp.abs(stp_consolidation))),
+                'replay_consolidation': replay_consolidation,
+                'n_tagged_synapses': int(jnp.sum(self.network.synaptic_tags > 0.1)),
+                'experience_buffer_size': len(self.network.experience_buffer),
+                'timestamp': time.time()
+            })
+            
+            self.logger.info(f"😴 Sleep completed: fatigue cleared, STP consolidated")
+            
+            return True
+        
+        return False
+    
+    def _perform_sleep_replay(self) -> float:
+        """
+        Perform sleep replay of important experiences.
+        
+        During sleep, the brain replays important experiences to consolidate memories.
+        This strengthens the synaptic connections involved in those experiences.
+        """
+        if not self.network.experience_buffer:
+            return 0.0
+        
+        total_consolidation = 0.0
+        replayed_experiences = 0
+        
+        # Sort experiences by importance (most important first)
+        experiences = sorted(self.network.experience_buffer, 
+                           key=lambda x: x['importance'], reverse=True)
+        
+        # Replay top experiences (limit to prevent excessive processing)
+        max_replays = min(10, len(experiences))
+        
+        for i in range(max_replays):
+            experience = experiences[i]
+            
+            # Generate replay activity pattern
+            replay_activity = self.network.plasticity.generate_replay_activity(
+                experience['activity'], 
+                self.network.replay_traces
+            )
+            
+            # Apply replay learning with reduced learning rate
+            replay_modulators = experience['modulators'].copy()
+            
+            # Replay learning is offline (no adenosine fatigue)
+            replay_modulators['adenosine'] = 0.0
+            
+            # Apply replay learning
+            old_weights = self.network.synaptic_weights.copy()
+            
+            # Simulate pre-post activity for replay
+            pre_activity = replay_activity
+            post_activity = replay_activity * 0.8  # Slightly compressed
+            
+            # Apply plasticity during replay
+            # Create eligibility trace specifically for replay
+            replay_eligibility = jnp.outer(post_activity, pre_activity) * 0.5
+            
+            self.network.synaptic_weights = self.network.plasticity.update_weights(
+                self.network.synaptic_weights,
+                pre_activity,
+                post_activity,
+                replay_eligibility,
+                replay_modulators
+            )
+            
+            # Calculate consolidation strength
+            consolidation = float(jnp.sum(jnp.abs(self.network.synaptic_weights - old_weights)))
+            total_consolidation += consolidation
+            replayed_experiences += 1
+            
+            # Update replay traces
+            self.network.replay_traces = self.network.replay_traces * 0.95 + jnp.outer(replay_activity, replay_activity) * 0.05
+        
+        # Log replay activity
+        if replayed_experiences > 0:
+            avg_consolidation = total_consolidation / replayed_experiences
+            self.logger.info(f"🔄 Sleep replay: {replayed_experiences} experiences, "
+                           f"avg consolidation: {avg_consolidation:.6f}")
+        
+        return total_consolidation
+    
+    def _compute_rpe_from_feedback(self, feedback: str) -> float:
+        """
+        Compute reward prediction error (RPE) from teacher feedback.
+        
+        Returns:
+            RPE ∈ {-1, 0, +1}:
+            - +1.0: Strong positive feedback (unexpected reward)
+            - +0.5: Mild positive feedback
+            - 0.0: Neutral feedback (no prediction error)
+            - -0.5: Mild negative feedback
+            - -1.0: Strong negative feedback (negative prediction error)
+        """
+        feedback_lower = feedback.lower()
+        
+        # Strong positive indicators
+        strong_positive = ["excellent", "perfect", "wonderful", "amazing", "fantastic", "brilliant"]
+        # Mild positive indicators  
+        mild_positive = ["good", "great", "nice", "well done", "correct", "right", "yes", "👍", "👏", "🎉"]
+        # Strong negative indicators (use word boundaries to avoid partial matches)
+        strong_negative = ["wrong", "incorrect", "bad", "terrible", "awful", " no ", "stop"]
+        # Mild negative indicators (check specific phrases first)
+        mild_negative = ["try again", "not quite", "almost", "close", "hmm", "⚠️"]
+        
+        # Check for specific mild negative phrases first (to avoid substring conflicts)
+        if any(phrase in feedback_lower for phrase in mild_negative):
+            return -0.5
+        # Then check for strong signals
+        elif any(pos in feedback_lower for pos in strong_positive):
+            return 1.0
+        elif any(neg in feedback_lower for neg in strong_negative):
+            return -1.0
+        # Then check for mild positive
+        elif any(pos in feedback_lower for pos in mild_positive):
+            return 0.5
+        else:
+            # Neutral feedback - no prediction error
+            return 0.0
     
     def _get_conversation_context(self) -> str:
         """Get recent conversation context."""
@@ -399,6 +665,16 @@ class PlasticContinualLearner:
                 'n_neurons': self.network.n_neurons,
                 'learning_step': self.network.learning_step
             },
+            # Phase 2 state
+            'pattern_familiarity': dict(list(self.pattern_familiarity.items())[-50:]),  # Recent patterns
+            'attention_context': self.attention_context[-10:],  # Recent context
+            'novelty_history': self.novelty_history[-20:],  # Recent novelty
+            # Phase 3 state
+            'sleep_cycle_counter': self.sleep_cycle_counter,
+            'fatigue_events': self.fatigue_events[-10:],  # Recent fatigue events
+            # Phase 4 state
+            'replay_events': self.replay_events[-10:],  # Recent replay events
+            'synaptic_capture_events': self.synaptic_capture_events[-10:],  # Recent capture events
             'timestamp': time.time()
         }
         
@@ -443,6 +719,19 @@ class PlasticContinualLearner:
             self.total_interactions = memory_data.get('total_interactions', 0)
             self.learned_associations = memory_data.get('learned_associations', {})
             self.plasticity_events = memory_data.get('plasticity_events', [])
+            
+            # Restore Phase 2 state
+            self.pattern_familiarity = memory_data.get('pattern_familiarity', {})
+            self.attention_context = memory_data.get('attention_context', [])
+            self.novelty_history = memory_data.get('novelty_history', [])
+            
+            # Restore Phase 3 state
+            self.sleep_cycle_counter = memory_data.get('sleep_cycle_counter', 0)
+            self.fatigue_events = memory_data.get('fatigue_events', [])
+            
+            # Restore Phase 4 state
+            self.replay_events = memory_data.get('replay_events', [])
+            self.synaptic_capture_events = memory_data.get('synaptic_capture_events', [])
             
             # Load tokenizer
             vocab_file = memory_file.replace('.json', '_vocab.json')
