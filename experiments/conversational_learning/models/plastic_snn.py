@@ -16,7 +16,6 @@ import jax.numpy as jnp
 from jax import jit, lax
 from typing import Dict, List, Tuple, Optional
 import numpy as np
-import time
 from functools import partial
 
 from hebbianllm.core.network import HebSNN
@@ -42,117 +41,26 @@ class SynapticPlasticity:
         
         # Metaplasticity (learning to learn)
         self.learning_rate_adaptation = 0.99  # Adapt learning rates
-        
-        # Phase 3: Adenosine fatigue parameters
-        self.adenosine_buildup_rate = 0.02   # How fast fatigue accumulates
-        self.adenosine_decay_rate = 0.05     # How fast fatigue recovers
-        self.fatigue_threshold = 0.7         # Above this, neurons get sluggish
-        
-        # Short-Term Plasticity (STP) parameters
-        self.stp_facilitation_tau = 0.5      # Facilitation time constant
-        self.stp_depression_tau = 0.8        # Depression time constant
-        self.stp_buffer_decay = 0.1          # How fast STP buffer decays
-        
-        # Phase 4: Sleep replay & Synaptic tagging parameters
-        self.tag_threshold = 0.3             # Minimum activity for tagging
-        self.tag_decay_rate = 0.02           # How fast tags decay
-        self.tag_capture_rate = 0.8          # How much tagged synapses get consolidated
-        self.replay_strength = 0.5           # Strength of replay consolidation
-        self.experience_importance_threshold = 0.7  # Threshold for storing experiences
     
     @partial(jit, static_argnums=(0,))
     def update_weights(self, weights: jnp.ndarray, 
                       pre_activity: jnp.ndarray, 
                       post_activity: jnp.ndarray,
-                      eligibility_trace: jnp.ndarray,
-                      modulators: Dict[str, float] = None) -> jnp.ndarray:
+                      eligibility_trace: jnp.ndarray) -> jnp.ndarray:
         """
-        Update synaptic weights based on pre/post activity with neuromodulation.
+        Update synaptic weights based on pre/post activity.
         
         Implements:
         - Hebbian LTP/LTD
         - Synaptic decay
         - Homeostatic scaling
-        - Neuromodulator gating (dopamine, acetylcholine, etc.)
         """
-        # Initialize modulator dict if not provided
-        if modulators is None:
-            modulators = {}
-        
-        # Extract key modulators (default to 0.0 if not present)
-        dopamine = modulators.get('dopamine', 0.0)
-        acetylcholine = modulators.get('acetylcholine', 0.0)
-        norepinephrine = modulators.get('norepinephrine', 0.0)
-        adenosine = modulators.get('adenosine', 0.0)
-        
-        # Phase 1: Dopamine RPE-gated learning
-        # Positive dopamine (RPE > 0) enhances LTP, reduces LTD
-        # Negative dopamine (RPE < 0) reduces LTP, enhances LTD
-        # Zero dopamine (RPE = 0) maintains baseline learning
-        
-        # Dopamine modulation parameters
-        γ_DA = 0.3  # Dopamine gain factor (increased from 0.2 for stronger effect)
-        
-        # JAX-compatible dopamine modulation using lax.cond
-        # Asymmetric modulation: positive dopamine enhances LTP more than LTD
-        
-        # For positive dopamine: enhance LTP, reduce LTD
-        positive_ltp_rate = self.ltp_rate * (1.0 + γ_DA * dopamine)
-        positive_ltd_rate = self.ltd_rate * (1.0 - 0.5 * γ_DA * dopamine)
-        
-        # For negative dopamine: reduce LTP, enhance LTD  
-        negative_ltp_rate = self.ltp_rate * (1.0 + γ_DA * dopamine)  # Negative reduces LTP
-        negative_ltd_rate = self.ltd_rate * (1.0 - γ_DA * dopamine)   # More forgetting
-        
-        # Use JAX conditionals for JIT compatibility
-        modulated_ltp_rate = jnp.where(dopamine > 0, positive_ltp_rate,
-                                      jnp.where(dopamine < 0, negative_ltp_rate, self.ltp_rate))
-        modulated_ltd_rate = jnp.where(dopamine > 0, positive_ltd_rate,
-                                      jnp.where(dopamine < 0, negative_ltd_rate, self.ltd_rate))
-        
-        # Phase 2: Acetylcholine attention + Norepinephrine novelty gain
-        # Acetylcholine: enhances learning for attended patterns, reduces for unattended
-        # Norepinephrine: boosts learning for novel/unexpected patterns
-        
-        # Acetylcholine modulation parameters
-        γ_ACh = 0.4  # Acetylcholine gain factor (stronger than dopamine)
-        
-        # High acetylcholine: enhance learning for current pattern
-        # Low acetylcholine: reduce learning (attention elsewhere)
-        ach_ltp_boost = 1.0 + γ_ACh * acetylcholine
-        ach_ltd_reduction = 1.0 - 0.3 * γ_ACh * acetylcholine  # Less forgetting when attending
-        
-        # Norepinephrine modulation parameters
-        γ_NE = 0.25  # Norepinephrine gain factor (moderate)
-        
-        # High norepinephrine: boost learning for novel patterns
-        # Affects both LTP and LTD for rapid adaptation
-        ne_learning_boost = 1.0 + γ_NE * norepinephrine
-        
-        # Apply combined neuromodulation
-        # Order: base rates -> dopamine -> acetylcholine -> norepinephrine -> adenosine
-        phase2_ltp_rate = modulated_ltp_rate * ach_ltp_boost * ne_learning_boost
-        phase2_ltd_rate = modulated_ltd_rate * ach_ltd_reduction * ne_learning_boost
-        
-        # Phase 3: Adenosine fatigue modulation
-        # High adenosine: reduce learning (neurons are tired)
-        # Low adenosine: normal learning (neurons are fresh)
-        
-        # Adenosine modulation parameters
-        γ_ADO = 0.5  # Adenosine suppression factor
-        
-        # Adenosine suppresses both LTP and LTD (tired neurons learn less)
-        adenosine_suppression = 1.0 - γ_ADO * adenosine
-        
-        # Final rates with adenosine fatigue
-        final_ltp_rate = phase2_ltp_rate * adenosine_suppression
-        final_ltd_rate = phase2_ltd_rate * adenosine_suppression
         # Hebbian plasticity: strengthen when pre and post fire together
-        hebbian_update = jnp.outer(post_activity, pre_activity) * final_ltp_rate
+        hebbian_update = jnp.outer(post_activity, pre_activity) * self.ltp_rate
         
         # Anti-Hebbian: weaken when only one fires
         anti_hebbian = (jnp.outer(post_activity, 1.0 - pre_activity) + 
-                       jnp.outer(1.0 - post_activity, pre_activity)) * final_ltd_rate
+                       jnp.outer(1.0 - post_activity, pre_activity)) * self.ltd_rate
         
         # Apply plasticity with eligibility trace
         plasticity_update = (hebbian_update - anti_hebbian) * eligibility_trace
@@ -207,165 +115,6 @@ class SynapticPlasticity:
         final_weights = pruned_weights + new_connections
         
         return final_weights
-    
-    @partial(jit, static_argnums=(0,))
-    def update_adenosine_fatigue(self, fatigue: jnp.ndarray, activity: jnp.ndarray) -> jnp.ndarray:
-        """
-        Update adenosine fatigue levels based on neural activity.
-        
-        Adenosine accumulates with activity and decays over time.
-        High adenosine = tired neurons that learn less.
-        """
-        # Adenosine buildup proportional to activity
-        adenosine_buildup = activity * self.adenosine_buildup_rate
-        
-        # Adenosine decay (clearance during rest)
-        adenosine_decay = fatigue * self.adenosine_decay_rate
-        
-        # Update fatigue levels
-        new_fatigue = fatigue + adenosine_buildup - adenosine_decay
-        
-        # Clamp fatigue to [0, 1] range
-        new_fatigue = jnp.clip(new_fatigue, 0.0, 1.0)
-        
-        return new_fatigue
-    
-    @partial(jit, static_argnums=(0,))
-    def update_stp_buffers(self, facilitation: jnp.ndarray, depression: jnp.ndarray, 
-                          stp_buffer: jnp.ndarray, pre_activity: jnp.ndarray, 
-                          post_activity: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """
-        Update Short-Term Plasticity (STP) buffers.
-        
-        STP provides temporary synaptic changes that can either facilitate or depress
-        transmission based on recent activity patterns.
-        """
-        # STP facilitation: synapses get stronger with use (up to a point)
-        # Facilitation increases with coincident activity
-        facilitation_increase = jnp.outer(post_activity, pre_activity) * 0.1
-        
-        # Facilitation decays over time
-        facilitation_decay = (facilitation - 1.0) / self.stp_facilitation_tau
-        
-        # Update facilitation
-        new_facilitation = facilitation + facilitation_increase - facilitation_decay
-        new_facilitation = jnp.clip(new_facilitation, 0.1, 2.0)  # Bounded facilitation
-        
-        # STP depression: synapses get weaker with overuse
-        # Depression increases with high activity
-        depression_increase = jnp.outer(post_activity, pre_activity) * 0.05
-        
-        # Depression recovers over time
-        depression_recovery = (1.0 - depression) / self.stp_depression_tau
-        
-        # Update depression
-        new_depression = depression - depression_increase + depression_recovery
-        new_depression = jnp.clip(new_depression, 0.1, 1.0)  # Bounded depression
-        
-        # STP buffer: temporary weight changes
-        # Buffer accumulates recent activity-dependent changes
-        buffer_update = jnp.outer(post_activity, pre_activity) * (new_facilitation * new_depression - 1.0) * 0.1
-        
-        # Buffer decays over time
-        buffer_decay = stp_buffer * self.stp_buffer_decay
-        
-        # Update buffer
-        new_stp_buffer = stp_buffer + buffer_update - buffer_decay
-        new_stp_buffer = jnp.clip(new_stp_buffer, -0.5, 0.5)  # Bounded buffer
-        
-        return new_facilitation, new_depression, new_stp_buffer
-    
-    @partial(jit, static_argnums=(0,))
-    def update_synaptic_tags(self, tags: jnp.ndarray, pre_activity: jnp.ndarray, 
-                           post_activity: jnp.ndarray, importance: float) -> jnp.ndarray:
-        """
-        Update synaptic tags for consolidation based on activity and importance.
-        
-        Synaptic tagging marks synapses that participated in important experiences
-        for later consolidation during sleep replay.
-        """
-        # Tag synapses that are active during important experiences
-        activity_based_tagging = jnp.outer(post_activity, pre_activity)
-        
-        # Only tag if activity is above threshold and experience is important
-        should_tag = (activity_based_tagging > self.tag_threshold) & (importance > 0.5)
-        
-        # Increase tags for important active synapses
-        tag_increase = jnp.where(should_tag, 
-                                activity_based_tagging * importance * 0.3, 
-                                0.0)
-        
-        # Tags decay over time
-        tag_decay = tags * self.tag_decay_rate
-        
-        # Update tags
-        new_tags = tags + tag_increase - tag_decay
-        
-        # Clamp tags to [0, 1] range
-        new_tags = jnp.clip(new_tags, 0.0, 1.0)
-        
-        return new_tags
-    
-    @partial(jit, static_argnums=(0,))
-    def apply_synaptic_capture(self, weights: jnp.ndarray, tags: jnp.ndarray, 
-                              stp_buffer: jnp.ndarray) -> jnp.ndarray:
-        """
-        Apply synaptic capture: consolidate STP changes into LTP based on tags.
-        
-        Tagged synapses get their STP changes consolidated into permanent weights
-        more effectively than untagged synapses.
-        """
-        # Calculate capture strength based on tags
-        capture_strength = tags * self.tag_capture_rate
-        
-        # Consolidate STP buffer into permanent weights proportional to tags
-        consolidation = stp_buffer * capture_strength
-        
-        # Apply consolidation to weights
-        new_weights = weights + consolidation
-        
-        # Clamp weights to reasonable range
-        new_weights = jnp.clip(new_weights, -1.0, 1.0)
-        
-        return new_weights
-    
-    @partial(jit, static_argnums=(0,))
-    def generate_replay_activity(self, stored_pattern: jnp.ndarray, 
-                                replay_traces: jnp.ndarray) -> jnp.ndarray:
-        """
-        Generate replay activity pattern based on stored experience.
-        
-        Creates a noisy, compressed version of the original activity pattern
-        for sleep replay consolidation.
-        """
-        # Add noise to stored pattern (replay is imperfect)
-        noise_level = 0.1
-        key = jax.random.PRNGKey(42)  # Fixed seed for deterministic replay
-        noise = jax.random.normal(key, stored_pattern.shape) * noise_level
-        
-        # Combine stored pattern with replay traces (now both 1D)
-        replay_activity = stored_pattern * 0.7 + replay_traces * 0.3 + noise
-        
-        # Apply sparse coding (only top activations)
-        k = max(1, int(0.03 * len(replay_activity)))  # Even sparser than wake (3%)
-        _, top_indices = jax.lax.top_k(replay_activity, k)
-        
-        # Create sparse replay pattern
-        sparse_replay = jnp.zeros_like(replay_activity)
-        sparse_replay = sparse_replay.at[top_indices].set(replay_activity[top_indices])
-        
-        # Normalize and scale for replay (JAX-compatible)
-        sum_activity = jnp.sum(sparse_replay)
-        max_activity = jnp.max(sparse_replay)
-        
-        # Use JAX conditional to avoid boolean conversion error
-        normalized_replay = jnp.where(
-            sum_activity > 0,
-            sparse_replay / jnp.maximum(max_activity, 1e-8) * self.replay_strength,
-            sparse_replay
-        )
-        
-        return normalized_replay
 
 
 class TokenMapper:
@@ -490,45 +239,8 @@ class PlasticHebSNN(HebSNN):
         self.activity_history = []
         self.learning_step = 0
         
-        # Phase 3: Adenosine fatigue + STP buffers (memory-optimized)
-        self.neuron_fatigue = jnp.zeros(self.n_neurons, dtype=self.dtype)  # Adenosine levels
-        # Use much smaller STP buffers - only track active connections
-        max_stp_connections = min(50000, self.n_neurons * 10)  # Limit STP buffer size  
-        self.stp_indices = jnp.zeros((max_stp_connections, 2), dtype=jnp.int32)  # (pre, post) indices
-        self.stp_facilitation = jnp.ones(max_stp_connections, dtype=self.dtype)  # STP facilitation values
-        self.stp_depression = jnp.ones(max_stp_connections, dtype=self.dtype)    # STP depression values
-        self.stp_buffer = jnp.zeros(max_stp_connections, dtype=self.dtype)       # Temporary changes
-        self.stp_active_count = 0  # Number of active STP connections
-        
-        # Phase 4: Sleep replay & Synaptic tagging (memory-optimized)
-        # Use sparse representation for synaptic tags - only track tagged synapses
-        max_tagged_synapses = min(10000, self.n_neurons * 5)  # Limit tagged synapses
-        self.tag_indices = jnp.zeros((max_tagged_synapses, 2), dtype=jnp.int32)  # (pre, post) indices  
-        self.synaptic_tags = jnp.zeros(max_tagged_synapses, dtype=self.dtype)    # Tag strength values
-        self.tagged_count = 0  # Number of active tags
-        self.experience_buffer = []  # Store important experiences for replay
-        # Use smaller replay traces - just track neuron-level activity
-        self.replay_traces = jnp.zeros(self.n_neurons, dtype=self.dtype)  # Activity traces for replay
-        
         # Current activity for tracking
         self.current_activity = jnp.zeros(self.n_neurons, dtype=self.dtype)
-        
-        # Phase 5: Add modulators for proper neuromodulation
-        from hebbianllm.core.network import Modulators
-        self.modulators = Modulators()
-        
-        # Phase 5: Optimization state for incremental updates
-        self.correlation_matrix = jnp.zeros((self.n_neurons, self.n_neurons), dtype=self.dtype)
-        self.correlation_update_count = 0
-        self.last_structural_update = 0
-        
-        # Phase 5: Performance monitoring
-        self.performance_stats = {
-            'structural_updates': 0,
-            'structural_skips': 0,
-            'connectivity_caps': 0,
-            'sleep_consolidations': 0
-        }
         
         print(f"PlasticHebSNN initialized:")
         print(f"  Fixed neurons: {self.n_neurons:,}")
@@ -537,7 +249,6 @@ class PlasticHebSNN(HebSNN):
         print(f"  Neurons per token: {self.token_mapper.neurons_per_token}")
         print(f"  Potential synapses: {self.n_neurons**2:,}")
         print(f"  Using device: {self.devices[0] if self.devices else 'CPU'}")
-        print(f"  Initial synaptic tags: {float(jnp.mean(self.synaptic_tags)):.3f}")
     
     def _init_plastic_weights(self) -> jnp.ndarray:
         """Initialize synaptic weights for plasticity."""
@@ -568,14 +279,13 @@ class PlasticHebSNN(HebSNN):
         
         return weights
     
-    def process_tokens(self, token_ids: List[int], learning: bool = True, modulators: Dict[str, float] = None) -> Dict:
+    def process_tokens(self, token_ids: List[int], learning: bool = True) -> Dict:
         """
-        Process tokens through the plastic network with neuromodulation.
+        Process tokens through the plastic network.
         
         Args:
             token_ids: List of token IDs to process
             learning: Whether to apply plasticity updates
-            modulators: Dictionary of neuromodulator concentrations
             
         Returns:
             Dictionary with processing results
@@ -592,7 +302,7 @@ class PlasticHebSNN(HebSNN):
         
         # Apply plasticity if learning
         if learning:
-            self._apply_plasticity_updates(activity_sequence, modulators)
+            self._apply_plasticity_updates(activity_sequence)
         
         # Update activity history
         self.activity_history.append(final_activity)
@@ -653,8 +363,8 @@ class PlasticHebSNN(HebSNN):
         
         return activities
     
-    def _apply_plasticity_updates(self, activity_sequence: List[jnp.ndarray], modulators: Dict[str, float] = None):
-        """Apply plasticity updates based on activity sequence with neuromodulation."""
+    def _apply_plasticity_updates(self, activity_sequence: List[jnp.ndarray]):
+        """Apply plasticity updates based on activity sequence."""
         self.learning_step += 1
         
         # Update eligibility trace (decaying memory of recent activity)
@@ -665,56 +375,21 @@ class PlasticHebSNN(HebSNN):
             # Store old weights for change tracking
             old_weights = self.synaptic_weights.copy()
             
-            # Phase 3: Update adenosine fatigue based on activity
-            self.neuron_fatigue = self.plasticity.update_adenosine_fatigue(
-                self.neuron_fatigue, post_activity
-            )
-            
-            # Set adenosine modulator based on average fatigue
-            if modulators is None:
-                modulators = {}
-            modulators['adenosine'] = float(jnp.mean(self.neuron_fatigue))
-            
-            # Phase 3: Update STP buffers (disabled for memory efficiency)
-            # TODO: Implement sparse STP buffer updates
-            # self.stp_facilitation, self.stp_depression, self.stp_buffer = self.plasticity.update_stp_buffers(
-            #     self.stp_facilitation, self.stp_depression, self.stp_buffer,
-            #     pre_activity, post_activity
-            # )
-            
-            # Apply STP buffer to weights temporarily (disabled for memory efficiency)
-            # TODO: Implement sparse STP buffer application
-            effective_weights = self.synaptic_weights  # Use original weights for now
-            
             # Update eligibility trace with decay
             self.eligibility_trace = self.eligibility_trace * 0.9 + jnp.outer(post_activity, pre_activity) * 0.1
             
-            # Apply synaptic plasticity with neuromodulation (including adenosine)
+            # Apply synaptic plasticity
             self.synaptic_weights = self.plasticity.update_weights(
-                effective_weights,  # Use STP-modified weights
+                self.synaptic_weights,
                 pre_activity,
                 post_activity, 
-                self.eligibility_trace,
-                modulators
+                self.eligibility_trace
             )
             
             # Log weight changes to verify plasticity is working
             weight_change = jnp.sum(jnp.abs(self.synaptic_weights - old_weights))
             if self.learning_step % 10 == 0:  # Log every 10 steps to avoid spam
-                avg_fatigue = float(jnp.mean(self.neuron_fatigue))
-                avg_stp = float(jnp.mean(jnp.abs(self.stp_buffer)))
-                print(f"Step {self.learning_step}: Weight change = {float(weight_change):.6f}, "
-                      f"Fatigue = {avg_fatigue:.3f}, STP = {avg_stp:.3f}")
-            
-            # Phase 4: Update synaptic tags based on experience importance
-            experience_importance = self._compute_experience_importance(modulators)
-            self.synaptic_tags = self.plasticity.update_synaptic_tags(
-                self.synaptic_tags, pre_activity, post_activity, experience_importance
-            )
-            
-            # Store important experiences for replay
-            if experience_importance > self.plasticity.experience_importance_threshold:
-                self._store_experience_for_replay(post_activity, experience_importance, modulators)
+                print(f"Step {self.learning_step}: Weight change sum = {float(weight_change):.6f}")
             
             # Apply connectivity cap to prevent saturation
             self._apply_connectivity_cap()
@@ -723,7 +398,7 @@ class PlasticHebSNN(HebSNN):
         if self.learning_step % 10 == 0:
             self._apply_structural_plasticity()
     
-    def _apply_connectivity_cap(self, max_connectivity: float = 0.12):
+    def _apply_connectivity_cap(self, max_connectivity: float = 0.08):
         """Apply connectivity cap with sleep-like consolidation."""
         # Calculate current connectivity
         non_zero_weights = jnp.abs(self.synaptic_weights) > 0.001
@@ -739,186 +414,38 @@ class PlasticHebSNN(HebSNN):
             # Verify reduction
             new_connectivity = float(jnp.mean(jnp.abs(self.synaptic_weights) > 0.001))
             print(f"After sleep: {new_connectivity:.1%} connectivity")
-            
-            # Phase 5: Performance monitoring
-            self.performance_stats['connectivity_caps'] += 1
-            self.performance_stats['sleep_consolidations'] += 1
     
     def _sleep_consolidation(self):
         """Sleep-like consolidation: strengthen important connections, prune weak ones."""
-        # Memory-optimized sleep mechanism for large networks
+        # Sleep mechanism: only keep the most important connections
+        weight_magnitude = jnp.abs(self.synaptic_weights)
         
-        # Use a more conservative percentage to avoid memory issues
-        target_connectivity = 0.03  # 3% instead of 5% to reduce memory usage
+        # Top 5% of connections survive (biological sparsity)
+        survival_threshold = jnp.percentile(weight_magnitude, 95)
+        survival_mask = weight_magnitude >= survival_threshold
         
-        # Work with chunks to avoid creating large intermediate tensors
-        chunk_size = 1000  # Process 1000 neurons at a time
-        consolidated_weights = jnp.zeros_like(self.synaptic_weights)
-        
-        # Global threshold based on current connectivity
-        current_weights = jnp.abs(self.synaptic_weights)
-        # Sample a subset to estimate threshold quickly
-        sample_size = min(10000, current_weights.size)
-        sample_indices = jax.random.choice(
-            jax.random.PRNGKey(42), 
-            current_weights.size, 
-            shape=(sample_size,), 
-            replace=False
-        )
-        sample_weights = current_weights.flatten()[sample_indices]
-        threshold = jnp.percentile(sample_weights, 97)  # Top 3% threshold
-        
-        # Apply threshold-based consolidation (more memory efficient)
-        strong_connections = current_weights > threshold
+        # Apply sleep consolidation
         consolidated_weights = jnp.where(
-            strong_connections,
-            self.synaptic_weights * 1.05,  # Modest strengthening
-            self.synaptic_weights * 0.1   # Weak pruning instead of complete removal
+            survival_mask,
+            self.synaptic_weights * 1.1,  # Strengthen survivors slightly
+            jnp.zeros_like(self.synaptic_weights)  # Prune the rest
         )
         
         return consolidated_weights
     
-    def _compute_experience_importance(self, modulators: Dict[str, float] = None) -> float:
-        """
-        Compute the importance of current experience for tagging and replay.
-        
-        Important experiences get tagged and stored for sleep replay.
-        """
-        if modulators is None:
-            modulators = {}
-        
-        # Base importance factors
-        dopamine_importance = abs(modulators.get('dopamine', 0.0))  # RPE magnitude
-        attention_importance = modulators.get('acetylcholine', 0.0)  # Attention level
-        novelty_importance = modulators.get('norepinephrine', 0.0)  # Novelty level
-        
-        # Combine importance factors
-        combined_importance = (
-            dopamine_importance * 0.4 +      # Strong RPE is very important
-            attention_importance * 0.3 +     # High attention is important
-            novelty_importance * 0.3         # Novel experiences are important
-        )
-        
-        # Normalize to [0, 1] range
-        importance = jnp.clip(combined_importance, 0.0, 1.0)
-        
-        return float(importance)
-    
-    def _store_experience_for_replay(self, activity: jnp.ndarray, importance: float, 
-                                   modulators: Dict[str, float] = None):
-        """
-        Store important experience for sleep replay.
-        
-        Stores activity pattern and context for later replay during sleep.
-        """
-        experience = {
-            'activity': activity.copy(),
-            'importance': importance,
-            'learning_step': self.learning_step,
-            'modulators': modulators.copy() if modulators else {},
-            'timestamp': time.time()
-        }
-        
-        # Add to experience buffer
-        self.experience_buffer.append(experience)
-        
-        # Keep only most recent and important experiences
-        if len(self.experience_buffer) > 50:
-            # Sort by importance and keep top experiences
-            self.experience_buffer.sort(key=lambda x: x['importance'], reverse=True)
-            self.experience_buffer = self.experience_buffer[:50]
-        
-        # Update replay traces with this experience (memory-optimized)
-        self.replay_traces = self.replay_traces * 0.9 + activity * 0.1
-    
     def _apply_structural_plasticity(self):
-        """Apply structural plasticity with Phase 5 optimizations."""
+        """Apply structural plasticity (synaptic pruning/formation)."""
         if len(self.activity_history) >= 2:
-            # Phase 5: Adaptive frequency based on network activity
-            activity_change = self._compute_activity_change()
-            steps_since_last = self.learning_step - self.last_structural_update
+            # Compute activity correlations
+            recent_activities = jnp.array(self.activity_history[-10:])  # Last 10 steps
+            correlations = jnp.corrcoef(recent_activities.T)
+            correlations = jnp.nan_to_num(correlations)  # Handle NaN from constant activity
             
-            # Only update if significant activity change or enough time has passed
-            if activity_change > 0.1 or steps_since_last >= 20:
-                # Phase 5: Incremental correlation update
-                self._update_correlation_matrix()
-                
-                # Apply structural plasticity with current correlation matrix
-                self.synaptic_weights = self.plasticity.prune_and_form_synapses(
-                    self.synaptic_weights, 
-                    jnp.abs(self.correlation_matrix)
-                )
-                
-                self.last_structural_update = self.learning_step
-                self.performance_stats['structural_updates'] += 1
-            else:
-                self.performance_stats['structural_skips'] += 1
-    
-    def _compute_activity_change(self) -> float:
-        """Compute change in activity pattern to determine if structural update is needed."""
-        if len(self.activity_history) < 2:
-            return 1.0  # Force update if insufficient history
-        
-        # Compare recent activity to older activity
-        recent_activity = jnp.array(self.activity_history[-3:])  # Last 3 steps
-        older_activity = jnp.array(self.activity_history[-6:-3])  # Previous 3 steps
-        
-        if len(older_activity) == 0:
-            return 1.0
-            
-        # Compute cosine similarity between recent and older patterns
-        recent_mean = jnp.mean(recent_activity, axis=0)
-        older_mean = jnp.mean(older_activity, axis=0)
-        
-        # Normalize vectors
-        recent_norm = jnp.linalg.norm(recent_mean)
-        older_norm = jnp.linalg.norm(older_mean)
-        
-        if recent_norm == 0 or older_norm == 0:
-            return 1.0
-            
-        similarity = jnp.dot(recent_mean, older_mean) / (recent_norm * older_norm)
-        change = 1.0 - similarity  # Higher change means less similarity
-        
-        return float(change)
-    
-    def _update_correlation_matrix(self):
-        """Incrementally update correlation matrix for efficiency."""
-        if len(self.activity_history) < 2:
-            return
-            
-        # Phase 5: Use exponential moving average for correlation updates
-        alpha = 0.1  # Learning rate for correlation updates
-        
-        # Get current and previous activity
-        current_activity = jnp.array(self.activity_history[-1])
-        
-        # Update correlation matrix incrementally using outer product
-        activity_outer = jnp.outer(current_activity, current_activity)
-        
-        # Exponential moving average update
-        self.correlation_matrix = (1 - alpha) * self.correlation_matrix + alpha * activity_outer
-        
-        # Handle numerical issues
-        self.correlation_matrix = jnp.nan_to_num(self.correlation_matrix)
-        
-        self.correlation_update_count += 1
-    
-    def get_performance_stats(self) -> Dict:
-        """Get Phase 5 performance optimization statistics."""
-        total_structural_calls = self.performance_stats['structural_updates'] + self.performance_stats['structural_skips']
-        structural_efficiency = (self.performance_stats['structural_skips'] / max(total_structural_calls, 1)) * 100
-        
-        return {
-            'structural_updates': self.performance_stats['structural_updates'],
-            'structural_skips': self.performance_stats['structural_skips'],
-            'structural_efficiency': f"{structural_efficiency:.1f}%",
-            'connectivity_caps': self.performance_stats['connectivity_caps'],
-            'sleep_consolidations': self.performance_stats['sleep_consolidations'],
-            'correlation_updates': self.correlation_update_count,
-            'learning_step': self.learning_step,
-            'last_structural_update': self.last_structural_update
-        }
+            # Apply structural plasticity
+            self.synaptic_weights = self.plasticity.prune_and_form_synapses(
+                self.synaptic_weights, 
+                jnp.abs(correlations)
+            )
     
     def generate_tokens(self, context_tokens: List[int], max_length: int = 10) -> List[int]:
         """Generate tokens based on current network state with sparse coding support."""
@@ -934,10 +461,6 @@ class PlasticHebSNN(HebSNN):
             
             # Decode activity to get next token
             next_tokens = self.token_mapper.decode_activity_to_tokens(result['activity'], top_k=10)
-            
-            # Filter out special tokens that shouldn't be generated
-            special_tokens_to_avoid = [0, 1, 2, 3]  # PAD, UNK, BOS, EOS
-            next_tokens = [t for t in next_tokens if t not in special_tokens_to_avoid]
             
             if next_tokens:
                 # Create more balanced sampling weights that give PAUSE tokens a fair chance
@@ -1004,10 +527,6 @@ class PlasticHebSNN(HebSNN):
         # Get available tokens, preferring higher IDs (learned patterns)
         available_tokens = list(self.token_mapper.token_mappings.keys())
         
-        # Filter out special tokens that shouldn't be generated
-        special_tokens_to_avoid = [0, 1, 2, 3]  # PAD, UNK, BOS, EOS
-        available_tokens = [t for t in available_tokens if t not in special_tokens_to_avoid]
-        
         if not available_tokens:
             # Fallback: use token range that avoids special tokens
             available_tokens = list(range(5, 25))
@@ -1060,34 +579,6 @@ class PlasticHebSNN(HebSNN):
         maturity_factor = float(jnp.exp(-self.learning_step / 50.0))
         tonic_strength = 0.3 * maturity_factor
         
-        # Phase 3: Adenosine fatigue and STP stats
-        fatigue_stats = {
-            'mean_fatigue': float(jnp.mean(self.neuron_fatigue)),
-            'max_fatigue': float(jnp.max(self.neuron_fatigue)),
-            'n_tired_neurons': int(jnp.sum(self.neuron_fatigue > self.plasticity.fatigue_threshold))
-        }
-        
-        stp_stats = {
-            'mean_facilitation': float(jnp.mean(self.stp_facilitation)),
-            'mean_depression': float(jnp.mean(self.stp_depression)),
-            'mean_stp_buffer': float(jnp.mean(jnp.abs(self.stp_buffer))),
-            'max_stp_buffer': float(jnp.max(jnp.abs(self.stp_buffer)))
-        }
-        
-        # Phase 4: Sleep replay & Synaptic tagging stats
-        tagging_stats = {
-            'mean_synaptic_tags': float(jnp.mean(self.synaptic_tags)),
-            'max_synaptic_tags': float(jnp.max(self.synaptic_tags)),
-            'n_tagged_synapses': int(jnp.sum(self.synaptic_tags > 0.1)),
-            'n_stored_experiences': len(self.experience_buffer)
-        }
-        
-        replay_stats = {
-            'mean_replay_traces': float(jnp.mean(jnp.abs(self.replay_traces))),
-            'max_replay_traces': float(jnp.max(jnp.abs(self.replay_traces))),
-            'experience_buffer_size': len(self.experience_buffer)
-        }
-        
         return {
             'learning_step': self.learning_step,
             'weights': weight_stats,
@@ -1095,11 +586,7 @@ class PlasticHebSNN(HebSNN):
             'token_mappings': len(self.token_mapper.token_mappings),
             'tonic_strength': tonic_strength,
             'maturity_factor': maturity_factor,
-            'is_mature': maturity_factor < 0.1,
-            'fatigue': fatigue_stats,
-            'stp': stp_stats,
-            'tagging': tagging_stats,
-            'replay': replay_stats
+            'is_mature': maturity_factor < 0.1
         }
     
     def reset_plasticity(self):
@@ -1131,15 +618,6 @@ class PlasticHebSNN(HebSNN):
                 'token_mappings': self.token_mapper.token_mappings,
                 'neuron_usage': np.array(self.token_mapper.neuron_usage),
                 'plasticity_stats': self.get_plasticity_stats(),
-                # Phase 3 state
-                'neuron_fatigue': np.array(self.neuron_fatigue),
-                'stp_facilitation': np.array(self.stp_facilitation),
-                'stp_depression': np.array(self.stp_depression),
-                'stp_buffer': np.array(self.stp_buffer),
-                # Phase 4 state
-                'synaptic_tags': np.array(self.synaptic_tags),
-                'replay_traces': np.array(self.replay_traces),
-                'experience_buffer': self.experience_buffer,
                 'network_config': {
                     'n_neurons': self.n_neurons,
                     'initial_connectivity': self.initial_connectivity,
@@ -1165,23 +643,6 @@ class PlasticHebSNN(HebSNN):
             self.eligibility_trace = jnp.array(data['eligibility_trace'])
             self.current_activity = jnp.array(data['current_activity'])
             self.learning_step = int(data['learning_step'])
-            
-            # Restore Phase 3 state (with defaults for backward compatibility)
-            self.neuron_fatigue = jnp.array(data.get('neuron_fatigue', 
-                                                   np.zeros(self.n_neurons, dtype=self.dtype)))
-            self.stp_facilitation = jnp.array(data.get('stp_facilitation', 
-                                                      np.ones((self.n_neurons, self.n_neurons), dtype=self.dtype)))
-            self.stp_depression = jnp.array(data.get('stp_depression', 
-                                                    np.ones((self.n_neurons, self.n_neurons), dtype=self.dtype)))
-            self.stp_buffer = jnp.array(data.get('stp_buffer', 
-                                               np.zeros((self.n_neurons, self.n_neurons), dtype=self.dtype)))
-            
-            # Restore Phase 4 state (with defaults for backward compatibility)
-            self.synaptic_tags = jnp.array(data.get('synaptic_tags', 
-                                                  np.zeros((self.n_neurons, self.n_neurons), dtype=self.dtype)))
-            self.replay_traces = jnp.array(data.get('replay_traces', 
-                                                  np.zeros((self.n_neurons, self.n_neurons), dtype=self.dtype)))
-            self.experience_buffer = data.get('experience_buffer', [])
             
             # Restore token mappings
             self.token_mapper.token_mappings = data['token_mappings'].item()

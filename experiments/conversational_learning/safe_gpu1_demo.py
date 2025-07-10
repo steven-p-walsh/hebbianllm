@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
 """
-Safe GPU 1 Neural Plasticity Demo - Complete Neuro-Inspired System
+Safe GPU 1 Neural Plasticity Demo
 
 Uses 14,173 neurons on GPU 1 with 3GB memory (safe allocation).
 GPU 0 is left free for the LLM teacher (google/gemma-3-12b).
-
-Features all 5 phases of neuro-inspired enhancements:
-- Phase 1: Dopamine RPE Gating
-- Phase 2: Acetylcholine Attention + Norepinephrine Novelty
-- Phase 3: Adenosine Fatigue + Short-Term Plasticity
-- Phase 4: Sleep Replay & Synaptic Tagging/Capture
-- Phase 5: Structural-Plasticity Optimization
 
 This provides a good balance of scale and memory safety.
 """
@@ -28,22 +21,18 @@ from plastic_learner import PlasticContinualLearner, PlasticLearnerConfig
 
 def print_safe_banner():
     """Print banner for safe demo."""
-    print("🧠 Safe GPU 1 Neuro-Inspired Learning Demo - CONTINUOUS")
-    print("=" * 65)
-    print("Complete biologically-inspired learning system:")
+    print("🎯 Safe GPU 1 Neural Plasticity Demo - CONTINUOUS")
+    print("=" * 55)
+    print("Memory-safe biologically realistic learning:")
     print("• 14,173 neurons on GPU 1 (3GB memory)")
     print("• 200+ MILLION potential synapses")
     print("• GPU 0 free for LLM teacher")
-    print("• 🧬 Phase 1: Dopamine RPE Gating")
-    print("• 🎯 Phase 2: Acetylcholine Attention + Norepinephrine Novelty")
-    print("• 😴 Phase 3: Adenosine Fatigue + Short-Term Plasticity")
-    print("• 🔄 Phase 4: Sleep Replay & Synaptic Tagging/Capture")
-    print("• ⚡ Phase 5: Structural-Plasticity Optimization")
+    print("• Real neural plasticity mechanisms")
     print("• No memory overflow risk")
     print("• RUNS CONTINUOUSLY until you stop it!")
     print()
     print("Press Ctrl+C to stop and see final results")
-    print("Complete neuro-inspired enhancement system!")
+    print("Optimal balance of scale and safety!")
     print()
 
 
@@ -86,7 +75,7 @@ def print_safe_stats(learner, turn):
     total_possible = stats['network_neurons'] ** 2
     active_connections = int(stats['connectivity'] * total_possible)
     
-    print(f"📊 Neuro-Inspired Network State (Turn {turn}):") 
+    print(f"📊 Safe Network State (Turn {turn}):") 
     print(f"   🧠 Neurons: {stats['network_neurons']:,} (FIXED)")
     print(f"   🔗 Active synapses: {active_connections:,}")
     print(f"   📡 Connectivity: {stats['connectivity']:.2%}")
@@ -94,23 +83,6 @@ def print_safe_stats(learner, turn):
     print(f"   📚 Vocabulary: {stats['vocabulary_size']:,} patterns")
     print(f"   🔄 Plasticity steps: {stats['plasticity_step']:,}")
     print(f"   🎯 Teacher stage: {stats['teacher_stage']}")
-    
-    # Show neuromodulation status
-    if hasattr(learner.network, 'modulators'):
-        dopamine = learner.network.modulators.get_mod('dopamine')
-        acetylcholine = learner.network.modulators.get_mod('acetylcholine')
-        norepinephrine = learner.network.modulators.get_mod('norepinephrine')
-        adenosine = learner.network.modulators.get_mod('adenosine')
-        
-        print(f"   🧬 Dopamine: {dopamine:.3f} | 🎯 Acetylcholine: {acetylcholine:.3f}")
-        print(f"   🔥 Norepinephrine: {norepinephrine:.3f} | 😴 Adenosine: {adenosine:.3f}")
-    
-    # Show Phase 5 performance stats
-    if hasattr(learner.network, 'get_performance_stats'):
-        perf_stats = learner.network.get_performance_stats()
-        print(f"   ⚡ Structural efficiency: {perf_stats['structural_efficiency']}")
-        print(f"   🛌 Sleep events: {perf_stats['sleep_consolidations']}")
-        print(f"   📈 Connectivity caps: {perf_stats['connectivity_caps']}")
     
     # Enhanced learning progress indicators
     if 'recent_plasticity' in stats and stats['recent_plasticity']:
@@ -248,11 +220,6 @@ def main():
             
             # Learn through safe-scale plasticity
             response = learner._generate_plastic_response(teacher_msg)
-            
-            # Ensure current_conversation is a list
-            if not hasattr(learner.current_conversation, 'append'):
-                learner.current_conversation = []  # Reset to list
-                
             learner.current_conversation.append({"role": "learner", "text": response})
             learner.total_interactions += 1
             
@@ -261,11 +228,6 @@ def main():
             
             # Get teacher feedback
             teacher_feedback = learner.teacher.respond_to_student(response)
-            
-            # Ensure current_conversation is a list
-            if not hasattr(learner.current_conversation, 'append'):
-                learner.current_conversation = []  # Reset to list
-                
             learner.current_conversation.append({"role": "teacher", "text": teacher_feedback})
             
             # Learn from feedback through plasticity
