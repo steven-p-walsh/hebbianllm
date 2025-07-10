@@ -140,10 +140,11 @@ class PlasticContinualLearner:
     
     def process_input_and_respond(self, input_text: str) -> str:
         """
-        Process input and generate response with real-time plasticity.
+        Process input and generate response with real-time plasticity and adaptive teacher feedback.
         
         This is where the key difference is: instead of growing the network,
-        we change the synaptic connections through plasticity.
+        we change the synaptic connections through plasticity. Now enhanced with
+        adaptive teacher integration for continuous symbiotic learning.
         """
         self.total_interactions += 1
         
@@ -153,22 +154,38 @@ class PlasticContinualLearner:
         # Learn from input through plasticity (not network growth!)
         self._learn_through_plasticity(input_text)
         
+        # Update teacher with current network state for adaptive prompting
+        if self.total_interactions % 10 == 0:  # Every 10 interactions to avoid overhead
+            network_stats = self.get_learning_stats()
+            simplified_stats = {
+                'vocabulary_size': network_stats['vocabulary_size'],
+                'connectivity': network_stats['connectivity'],
+                'active_neurons': network_stats['active_neurons'],
+                'plasticity_step': network_stats['plasticity_step'],
+                'maturity_factor': network_stats.get('maturity_factor', 1.0)
+            }
+            self.teacher.set_learner_stats(simplified_stats)
+        
         # Generate response using current network state
         response = self._generate_plastic_response(input_text)
         
         # Record response
         self.current_conversation.append({"role": "learner", "text": response})
         
-        # Get teacher feedback
+        # Get adaptive teacher feedback (now enhanced with progress tracking)
         teacher_feedback = self.teacher.respond_to_student(response)
         self.current_conversation.append({"role": "teacher", "text": teacher_feedback})
         
         # Learn from feedback through plasticity
         self._learn_from_feedback_plastic(response, teacher_feedback)
         
-        # Monitor plasticity changes
+        # Monitor plasticity changes and auto-adjust if needed
         if self.total_interactions % 5 == 0:
             self._monitor_plasticity()
+        
+        # Auto-adjust learning parameters based on progress
+        if self.total_interactions % 100 == 0:
+            self._auto_adjust_learning_rates()
         
         # Save network state more frequently
         if self.total_interactions % self.config.network_save_interval == 0:
@@ -178,9 +195,14 @@ class PlasticContinualLearner:
         if self.total_interactions % self.config.save_interval == 0:
             self._save_memory()
         
+        # Log with enhanced metrics
+        teacher_metrics = self.teacher.get_learning_metrics()
         self.logger.info(f"Input: {input_text}")
         self.logger.info(f"Learner: {response}")
         self.logger.info(f"Teacher: {teacher_feedback}")
+        self.logger.info(f"Teacher metrics - Stage: {teacher_metrics['current_stage']}, "
+                        f"Vocab: {teacher_metrics['vocabulary_size']}, "
+                        f"Improvement streak: {teacher_metrics['improvement_streak']}")
         
         return response
     
@@ -243,11 +265,24 @@ class PlasticContinualLearner:
             recent_context = self._get_conversation_context()
             context_tokens = self.tokenizer.encode(recent_context, add_special_tokens=False)
             
-            # Generate using current plastic network state
+            # Generate using current plastic network state WITH exploration plasticity
+            # Store original plasticity rates
+            original_ltp = self.network.plasticity.ltp_rate
+            original_ltd = self.network.plasticity.ltd_rate
+            
+            # Enable reduced plasticity during generation for exploration
+            self.network.plasticity.ltp_rate *= 0.5  # Reduced learning during exploration
+            self.network.plasticity.ltd_rate *= 0.5  # Reduced forgetting during exploration
+            
             generated_tokens = self.network.generate_tokens(
                 context_tokens[-8:],  # Recent context
-                max_length=8         # Short responses
+                max_length=8,        # Short responses
+                learning=True        # Enable exploration plasticity
             )
+            
+            # Restore original plasticity rates
+            self.network.plasticity.ltp_rate = original_ltp
+            self.network.plasticity.ltd_rate = original_ltd
             
             # Remove context to get just the response
             if len(generated_tokens) > len(context_tokens):
@@ -311,8 +346,9 @@ class PlasticContinualLearner:
         """
         Learn from teacher feedback through plasticity adjustments.
         
-        Positive feedback strengthens recent synaptic changes.
-        Negative feedback weakens them.
+        Key improvement: Implement reward-modulated replay that directly
+        associates context with response based on feedback valence.
+        Enhanced with special reinforcement for proper pause usage.
         """
         # Analyze feedback sentiment
         positive_indicators = ["good", "great", "yes", "right", "nice", "excellent"]
@@ -322,26 +358,113 @@ class PlasticContinualLearner:
         is_positive = any(pos in feedback_lower for pos in positive_indicators)
         is_negative = any(neg in feedback_lower for neg in negative_indicators)
         
-        # Encode feedback for plasticity
-        feedback_tokens = self.tokenizer.encode(feedback)
+        # Special reinforcement for pause usage
+        response_has_spaces = ' ' in response.strip()
+        feedback_mentions_clarity = any(word in feedback_lower for word in 
+                                      ["clear", "space", "pause", "better", "easier", "understand"])
         
-        if feedback_tokens:
-            # Process feedback with plasticity modulation
-            if is_positive:
-                # Strengthen recent plasticity changes
-                self.network.plasticity.ltp_rate *= 1.1  # Boost learning rate temporarily
-                self.logger.debug("Positive feedback: boosting plasticity")
+        # Boost positive feedback if response has proper spacing
+        if is_positive and response_has_spaces:
+            is_positive = "enhanced_positive"  # Mark for stronger reinforcement
+            self.logger.debug("Enhanced positive feedback for spaced response")
+        
+        # Provide corrective feedback if response lacks spaces but should have them
+        if not response_has_spaces and feedback_mentions_clarity:
+            # Artificial negative signal for concatenated responses
+            is_negative = True
+            self.logger.debug("Negative signal for concatenated response")
+        
+        # CRITICAL IMPROVEMENT: Reward-modulated replay for context-response associations
+        context = self._get_conversation_context()
+        context_tokens = self.tokenizer.encode(context)
+        response_tokens = self.tokenizer.encode(response)
+        
+        # Create combined context + response sequence for joint learning
+        combined_tokens = context_tokens + response_tokens
+        
+        # Update neuromodulation based on feedback
+        if is_positive == "enhanced_positive":
+            reward_signal = 1.0  # Strong reward for spaced responses
+            novelty_signal = 0.5  # Moderate novelty
+        elif is_positive:
+            reward_signal = 0.7  # Good reward
+            novelty_signal = 0.3  # Some novelty
+        elif is_negative:
+            reward_signal = -0.5  # Negative reward
+            novelty_signal = 0.8  # High novelty (need to learn)
+        else:
+            reward_signal = 0.0  # Neutral
+            novelty_signal = 0.2  # Low novelty
+            
+        # Update neuromodulators
+        self.network.plasticity.neuromodulator.update_dopamine(reward_signal)
+        self.network.plasticity.neuromodulator.update_acetylcholine(novelty_signal)
+        
+        # Set error signal for error-driven plasticity
+        if is_negative:
+            self.network.set_error_signal(-reward_signal)  # Negative error for wrong responses
+        else:
+            self.network.set_error_signal(0.0)  # No error for correct responses
+        
+        if combined_tokens:
+            # Store original plasticity rates
+            original_ltp = self.network.plasticity.ltp_rate
+            original_ltd = self.network.plasticity.ltd_rate
+            
+            # Modulate plasticity based on feedback valence
+            if is_positive == "enhanced_positive":
+                # Extra strong reinforcement for spaced responses
+                self.network.plasticity.ltp_rate *= 2.0  # Strong boost for good spaced responses
+                self.network.plasticity.ltd_rate *= 0.6  # Minimal forgetting
+                self.logger.debug("Enhanced positive feedback: strongly reinforcing spaced response")
+                
+                # Specifically strengthen pathways leading to pause tokens
+                pause_tokens = self.tokenizer.encode(' ')  # Get pause token representations
+                if pause_tokens:
+                    # Process pause tokens with extra strengthening
+                    self.network.process_tokens(pause_tokens, learning=True)
+                    
+            elif is_positive:
+                # Strengthen context-response pathway for good responses
+                self.network.plasticity.ltp_rate *= 1.5  # Boost learning significantly
+                self.network.plasticity.ltd_rate *= 0.8  # Reduce forgetting
+                self.logger.debug("Positive feedback: strengthening context-response pathway")
             elif is_negative:
-                # Weaken recent changes
-                self.network.plasticity.ltd_rate *= 1.1  # Boost forgetting temporarily
-                self.logger.debug("Negative feedback: increasing forgetting")
+                # Weaken context-response pathway for bad responses
+                self.network.plasticity.ltp_rate *= 0.7  # Reduce learning
+                self.network.plasticity.ltd_rate *= 1.5  # Boost forgetting
+                self.logger.debug("Negative feedback: weakening context-response pathway")
+                
+                # If response lacked spaces, specifically weaken non-pause pathways
+                if not response_has_spaces:
+                    # Gentle weakening of concatenated patterns
+                    self.network.plasticity.ltd_rate *= 1.2  # Slight additional forgetting
+                    self.logger.debug("Weakening concatenated response patterns")
             
-            # Process feedback through network
+            # Process the combined sequence to create direct associations
+            self.network.process_tokens(combined_tokens, learning=True)
+            
+            # Reset plasticity rates
+            self.network.plasticity.ltp_rate = original_ltp
+            self.network.plasticity.ltd_rate = original_ltd
+        
+        # Now process feedback separately (teacher correction patterns)
+        feedback_tokens = self.tokenizer.encode(feedback)
+        if feedback_tokens:
+            # Always learn from teacher feedback with slight LTP boost (corrections)
+            self.network.plasticity.ltp_rate *= 1.2
             self.network.process_tokens(feedback_tokens, learning=True)
+            self.network.plasticity.ltp_rate /= 1.2
             
-            # Reset learning rates to baseline
-            self.network.plasticity.ltp_rate *= 0.99
-            self.network.plasticity.ltd_rate *= 0.99
+        # Add successful sequences to replay buffer for consolidation
+        if combined_tokens:
+            if is_positive == "enhanced_positive":
+                self.network.add_to_replay_buffer(combined_tokens, reward=1.0)
+            elif is_positive:
+                self.network.add_to_replay_buffer(combined_tokens, reward=0.7)
+            elif is_negative:
+                # Still add negative examples for learning, but with negative reward
+                self.network.add_to_replay_buffer(combined_tokens, reward=-0.3)
         
         # Record association
         if response not in self.learned_associations:
@@ -384,8 +507,9 @@ class PlasticContinualLearner:
             self.network.plasticity.homeostatic_rate *= 1.1
     
     def _save_memory(self):
-        """Save learner's plasticity state."""
+        """Save learner's plasticity state and teacher adaptive metrics."""
         plasticity_stats = self.network.get_plasticity_stats()
+        teacher_metrics = self.teacher.get_learning_metrics()
         
         memory_data = {
             'conversation_count': self.conversation_count,
@@ -395,9 +519,15 @@ class PlasticContinualLearner:
             'plasticity_stats': plasticity_stats,
             'tokenizer_stats': self.tokenizer.get_pattern_stats(),
             'teacher_stage': self.teacher.current_stage,
+            'teacher_metrics': teacher_metrics,  # Enhanced teacher tracking
             'network_config': {
                 'n_neurons': self.network.n_neurons,
                 'learning_step': self.network.learning_step
+            },
+            'symbiotic_learning': {
+                'teacher_learner_vocab_ratio': teacher_metrics['vocabulary_size'] / max(1, self.tokenizer.get_vocab_size()),
+                'plasticity_teacher_alignment': plasticity_stats['weights']['connectivity'] * teacher_metrics['improvement_streak'],
+                'adaptive_feedback_quality': teacher_metrics.get('vocabulary_growth_rate', 0.0)
             },
             'timestamp': time.time()
         }
@@ -410,7 +540,13 @@ class PlasticContinualLearner:
         vocab_file = self.config.memory_file.replace('.json', '_vocab.json')
         self.tokenizer.save_vocabulary(vocab_file)
         
-        self.logger.info(f"Plastic memory saved: {self.conversation_count} conversations")
+        # Save teacher conversation state
+        teacher_conversation_file = self.config.memory_file.replace('.json', '_teacher_conversation.json')
+        self.teacher.save_conversation(teacher_conversation_file)
+        
+        self.logger.info(f"Plastic memory saved: {self.conversation_count} conversations, "
+                        f"Teacher stage: {teacher_metrics['current_stage']}, "
+                        f"Symbiotic alignment: {memory_data['symbiotic_learning']['plasticity_teacher_alignment']:.3f}")
     
     def _save_network_state(self):
         """Save the network's synaptic state."""
@@ -457,6 +593,12 @@ class PlasticContinualLearner:
             else:
                 self.logger.info("No network state found, starting with fresh synapses")
             
+            # Load teacher conversation state
+            teacher_conversation_file = memory_file.replace('.json', '_teacher_conversation.json')
+            if Path(teacher_conversation_file).exists():
+                self.teacher.load_conversation(teacher_conversation_file)
+                self.logger.info("Teacher conversation state restored")
+            
             self.logger.info(f"Plastic memory loaded: {self.conversation_count} conversations")
             
         except FileNotFoundError:
@@ -465,9 +607,31 @@ class PlasticContinualLearner:
             self.logger.warning(f"Failed to load memory: {e}")
     
     def get_learning_stats(self) -> Dict:
-        """Get comprehensive learning statistics."""
+        """Get comprehensive learning statistics with enhanced monitoring."""
         plasticity_stats = self.network.get_plasticity_stats()
         tokenizer_stats = self.tokenizer.get_pattern_stats()
+        
+        # Calculate additional learning metrics
+        weight_change_norm = 0.0
+        if len(self.plasticity_events) >= 2:
+            recent_connectivity = [event['stats']['weights']['connectivity'] for event in self.plasticity_events[-5:]]
+            weight_change_norm = np.std(recent_connectivity) if len(recent_connectivity) > 1 else 0.0
+        
+        # Response-feedback similarity for credit assignment monitoring
+        response_feedback_overlap = 0.0
+        if self.learned_associations:
+            recent_associations = list(self.learned_associations.items())[-10:]
+            overlaps = []
+            for response, feedback_list in recent_associations:
+                for feedback_data in feedback_list[-3:]:  # Recent feedback for this response
+                    feedback = feedback_data['feedback']
+                    # Simple token overlap measure
+                    response_tokens = set(self.tokenizer.encode(response))
+                    feedback_tokens = set(self.tokenizer.encode(feedback))
+                    if response_tokens and feedback_tokens:
+                        overlap = len(response_tokens & feedback_tokens) / len(response_tokens | feedback_tokens)
+                        overlaps.append(overlap)
+            response_feedback_overlap = np.mean(overlaps) if overlaps else 0.0
         
         return {
             'conversations': self.conversation_count,
@@ -481,5 +645,32 @@ class PlasticContinualLearner:
             'teacher_stage': self.teacher.current_stage,
             'tokenizer_stats': tokenizer_stats,
             'plasticity_events': len(self.plasticity_events),
-            'recent_plasticity': self.plasticity_events[-3:] if self.plasticity_events else []
+            'recent_plasticity': self.plasticity_events[-3:] if self.plasticity_events else [],
+            # Enhanced monitoring metrics
+            'weight_change_norm': weight_change_norm,
+            'response_feedback_overlap': response_feedback_overlap,
+            'maturity_factor': plasticity_stats.get('maturity_factor', 1.0),
+            'tonic_strength': plasticity_stats.get('tonic_strength', 0.0),
+            'current_ltp_rate': self.network.plasticity.ltp_rate,
+            'current_ltd_rate': self.network.plasticity.ltd_rate
         }
+    
+    def _auto_adjust_learning_rates(self):
+        """Auto-adjust learning rates based on progress monitoring."""
+        stats = self.get_learning_stats()
+        
+        # If responses don't show good overlap with feedback after many turns, boost rates
+        if (self.total_interactions > 1000 and 
+            stats['response_feedback_overlap'] < 0.2 and 
+            stats['learned_associations'] < 10):
+            
+            self.network.plasticity.base_ltp_rate *= 1.1
+            self.network.plasticity.base_ltd_rate *= 1.05
+            self.logger.info(f"Auto-boosted learning rates: LTP={self.network.plasticity.base_ltp_rate:.4f}")
+        
+        # If connectivity stays too low for too long, reduce decay
+        if (stats['connectivity'] < 0.03 and 
+            self.total_interactions > 500):
+            
+            self.network.plasticity.decay_rate *= 0.9
+            self.logger.info(f"Reduced decay rate to {self.network.plasticity.decay_rate:.4f}")

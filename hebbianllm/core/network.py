@@ -23,35 +23,74 @@ except ImportError:
 from typing import Tuple, Dict, Any, Optional, List
 import numpy as np
 from functools import partial
+from dataclasses import dataclass, field
+from collections import defaultdict
 
 # Configure JAX for maximum performance
 jax.config.update('jax_enable_x64', False)  # Use float32 for speed
 
-# Auto-detect and use GPU if available
-try:
-    devices = jax.devices('gpu')
-    if devices:
-        print(f"GPU backend configured with {len(devices)} GPUs: {devices}")
-        jax.config.update('jax_default_device', devices[0])
-        # Enable multi-GPU if available
-        if len(devices) > 1:
-            print("Multi-GPU configuration enabled")
-    else:
-        print("No GPU found, falling back to CPU")
-        jax.config.update('jax_platform_name', 'cpu')
-except:
-    print("GPU configuration failed, using CPU")
-    jax.config.update('jax_platform_name', 'cpu')
+# Auto-detect and use GPU if available (temporarily disabled to fix hanging)
+# try:
+#     devices = jax.devices('gpu')
+#     if devices:
+#         print(f"GPU backend configured with {len(devices)} GPUs: {devices}")
+#         jax.config.update('jax_default_device', devices[0])
+#         # Enable multi-GPU if available
+#         if len(devices) > 1:
+#             print("Multi-GPU configuration enabled")
+#     else:
+#         print("No GPU found, falling back to CPU")
+#         jax.config.update('jax_platform_name', 'cpu')
+# except:
+#     print("GPU configuration failed, using CPU")
+#     jax.config.update('jax_platform_name', 'cpu')
 
-# Enable memory and performance optimizations
-try:
-    jax.config.update('jax_traceback_filtering', 'off')
-    jax.config.update('jax_gpu_memory_fraction', 0.8)  # Use 80% of GPU memory
-    jax.config.update('jax_enable_memories', True)  # Enable memory optimization
-except:
-    pass  # Ignore if options not available
+# Enable memory and performance optimizations (temporarily disabled to fix hanging)
+# try:
+#     jax.config.update('jax_traceback_filtering', 'off')
+#     jax.config.update('jax_gpu_memory_fraction', 0.8)  # Use 80% of GPU memory
+#     jax.config.update('jax_enable_memories', True)  # Enable memory optimization
+# except:
+#     pass  # Ignore if options not available
 
 print("High-performance JAX backend configured")
+
+
+@dataclass
+class Modulators:
+    """
+    Neuromodulator bus for brain-inspired learning enhancements.
+    
+    Stores neuromodulator concentrations that influence neural dynamics:
+    - 'dopamine' (DA): Reward prediction error, gates learning
+    - 'acetylcholine' (ACh): Attention and input gating  
+    - 'norepinephrine' (NE): Novelty and arousal
+    - 'adenosine' (Ado): Fatigue and sleep pressure
+    - 'serotonin' (5HT): Mood and learning rate
+    """
+    values: Dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    
+    def set_mod(self, name: str, value: float):
+        """Set modulator concentration."""
+        self.values[name] = float(value)
+    
+    def get_mod(self, name: str) -> float:
+        """Get modulator concentration (0.0 if not set)."""
+        return self.values.get(name, 0.0)
+    
+    def decay_mod(self, name: str, tau: float, dt: float = 1.0):
+        """Exponentially decay modulator with time constant tau."""
+        if name in self.values:
+            decay_factor = jnp.exp(-dt / tau)
+            self.values[name] *= float(decay_factor)
+    
+    def reset(self):
+        """Reset all modulators to zero."""
+        self.values.clear()
+    
+    def to_dict(self) -> Dict[str, float]:
+        """Convert to regular dictionary for JAX operations."""
+        return dict(self.values)
 
 # Memory pool for reusing arrays
 class MemoryPool:
@@ -78,7 +117,7 @@ class MemoryPool:
 # Global memory pool
 _memory_pool = MemoryPool()
 
-@jit
+# @jit  # Temporarily disabled to fix hanging import
 def sparse_event_propagation(active_neurons: jnp.ndarray,
                            connectivity_matrix: jnp.ndarray,
                            weights: jnp.ndarray,
@@ -96,7 +135,7 @@ def sparse_event_propagation(active_neurons: jnp.ndarray,
     
     return input_currents
 
-@jit
+# @jit  # Temporarily disabled to fix hanging import
 def vectorized_lif_dynamics(v: jnp.ndarray,
                           i_input: jnp.ndarray,
                           params: Dict[str, jnp.ndarray],
@@ -130,7 +169,7 @@ def vectorized_lif_dynamics(v: jnp.ndarray,
     
     return v_new, spike_mask
 
-@jit
+# @jit  # Temporarily disabled to fix hanging import
 def batch_stdp_update(pre_indices: jnp.ndarray,
                      post_indices: jnp.ndarray,
                      weights: jnp.ndarray,
@@ -167,7 +206,7 @@ def batch_stdp_update(pre_indices: jnp.ndarray,
     
     return new_weights
 
-@jit
+# @jit  # Temporarily disabled to fix hanging import
 def compute_network_states(states: Dict[str, jnp.ndarray],
                          inputs: jnp.ndarray,
                          params: Dict[str, Any]) -> Dict[str, jnp.ndarray]:
@@ -226,7 +265,7 @@ def compute_network_states(states: Dict[str, jnp.ndarray],
     }
 
 # Multi-GPU batch processing for maximum throughput
-@partial(jit, static_argnums=(2,))
+# @partial(jit, static_argnums=(2,))  # Temporarily disabled to fix hanging import
 def batch_process_patterns(patterns: jnp.ndarray,
                          network_params: Dict[str, Any],
                          n_steps: int) -> Dict[str, jnp.ndarray]:
@@ -345,6 +384,9 @@ class HebSNN:
         self.n_neurons = n_sensory + n_associative + n_inhibitory + n_output
         self.batch_size = batch_size
         self.mixed_precision = mixed_precision
+        
+        # Initialize neuromodulator bus
+        self.modulators = Modulators()
         
         # Set up precision (use float32 for better GPU performance)
         self.dtype = jnp.float32
@@ -520,16 +562,21 @@ class HebSNN:
         self.spike_history = []
         self.baseline_activity = jnp.zeros(self.n_neurons, dtype=self.dtype)
     
-    def step(self, inputs: jnp.ndarray, dt: float = 1.0) -> Tuple[jnp.ndarray, float]:
+    def step(self, inputs: jnp.ndarray, dt: float = 1.0, modulators: Optional[Modulators] = None) -> Tuple[jnp.ndarray, float]:
         """
-        High-performance single step execution.
+        High-performance single step execution with neuromodulator support.
         """
-        # Prepare parameters
+        # Use provided modulators or default to network's modulators
+        if modulators is None:
+            modulators = self.modulators
+            
+        # Prepare parameters with modulator values
         params = {
             **self.neuron_params,
             **self.learning_params,
             'current_time': self.current_time,
-            'dt': dt
+            'dt': dt,
+            'modulators': modulators.to_dict()
         }
         
         # Sparse input propagation

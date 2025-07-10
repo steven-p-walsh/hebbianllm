@@ -167,7 +167,8 @@ class BiologicalTokenizer:
             self.pattern_combinations[segments[i]][segments[i + 1]] += 1
             
             # For patterns without PAUSE, require more frequency
-            min_frequency = 3 if '<PAUSE>' not in bigram else 2
+            # PAUSE patterns are prioritized with lower frequency requirements
+            min_frequency = 3 if '<PAUSE>' not in bigram else 1
             
             # If this combination is frequent enough, consider it a new pattern
             if (len(bigram) <= 8 and  # Reasonable length (allow longer for PAUSE patterns)
@@ -187,6 +188,7 @@ class BiologicalTokenizer:
             self.pattern_combinations[trigram]['_trigram_count'] += 1
             
             # For patterns with PAUSE, require lower frequency
+            # PAUSE patterns are learned more aggressively
             min_frequency = 2 if '<PAUSE>' not in trigram else 1
             
             # Learn trigram if frequent enough
@@ -198,12 +200,18 @@ class BiologicalTokenizer:
                 self._add_new_pattern(trigram)
     
     def _add_new_pattern(self, pattern: str):
-        """Add a new learned pattern to the vocabulary."""
+        """Add a new learned pattern to the vocabulary with priority for pause patterns."""
         new_id = len(self.pattern_to_id)
         self.pattern_to_id[pattern] = new_id
         self.id_to_pattern[new_id] = pattern
         
-        print(f"Learned new pattern: '{pattern}' (id: {new_id})")
+        # Give extra boost to patterns containing pause tokens
+        if '<PAUSE>' in pattern:
+            # Immediately increase usage to prioritize pause patterns
+            self.pattern_usage[pattern] += 5  # Boost usage count
+            print(f"Learned new PAUSE pattern: '{pattern}' (id: {new_id}) - PRIORITIZED")
+        else:
+            print(f"Learned new pattern: '{pattern}' (id: {new_id})")
     
     def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
         """Encode text to token IDs using biological segmentation."""
@@ -268,7 +276,9 @@ class BiologicalTokenizer:
         # Find rarely used patterns
         patterns_to_remove = []
         for pattern, usage in self.pattern_usage.items():
-            if usage < min_usage and pattern not in self.special_tokens:
+            if (usage < min_usage and 
+                pattern not in self.special_tokens and 
+                '<PAUSE>' not in pattern):  # Protect pause patterns from removal
                 patterns_to_remove.append(pattern)
         
         # Remove rarely used patterns (keeping space for new ones)
@@ -291,7 +301,8 @@ class BiologicalTokenizer:
                     continue
                     
                 # Allow PAUSE patterns but require lower frequency
-                min_count = 3 if '<PAUSE>' not in (first_pattern + second_pattern) else 2
+                # Prioritize pause patterns with even lower requirements
+                min_count = 3 if '<PAUSE>' not in (first_pattern + second_pattern) else 1
                 
                 if count >= min_count:  # Frequently seen together
                     new_pattern = first_pattern + second_pattern

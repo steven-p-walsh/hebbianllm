@@ -1,0 +1,1478 @@
+diff --git a/experiments/conversational_learning/models/plastic_snn.py b/experiments/conversational_learning/models/plastic_snn.py
+index 7841dd8..5261d27 100644
+--- a/experiments/conversational_learning/models/plastic_snn.py
++++ b/experiments/conversational_learning/models/plastic_snn.py
+@@ -21,6 +21,53 @@ from functools import partial
+ from hebbianllm.core.network import HebSNN
+ 
+ 
++class Neuromodulator:
++    """Manages neuromodulation signals (dopamine-like, acetylcholine-like)."""
++    
++    def __init__(self, dtype=jnp.float32):
++        self.dtype = dtype
++        
++        # Neuromodulator levels
++        self.dopamine_level = 0.0    # Reward signal
++        self.acetylcholine_level = 0.0  # Attention/novelty signal
++        
++        # History for adaptation
++        self.reward_history = []
++        self.novelty_history = []
++        
++        # Decay rates
++        self.dopamine_decay = 0.8
++        self.acetylcholine_decay = 0.7
++    
++    def update_dopamine(self, reward: float):
++        """Update dopamine based on reward signal."""
++        self.dopamine_level = self.dopamine_level * self.dopamine_decay + reward
++        self.reward_history.append(reward)
++        if len(self.reward_history) > 20:
++            self.reward_history.pop(0)
++    
++    def update_acetylcholine(self, novelty: float):
++        """Update acetylcholine based on novelty/attention signal."""
++        self.acetylcholine_level = self.acetylcholine_level * self.acetylcholine_decay + novelty
++        self.novelty_history.append(novelty)
++        if len(self.novelty_history) > 20:
++            self.novelty_history.pop(0)
++    
++    def get_ltp_modulation(self) -> float:
++        """Get LTP modulation based on neuromodulator levels."""
++        # Dopamine boosts LTP (reward-based learning)
++        dopamine_boost = 1.0 + self.dopamine_level * 0.5
++        # Acetylcholine boosts attention to novel patterns
++        attention_boost = 1.0 + self.acetylcholine_level * 0.3
++        return dopamine_boost * attention_boost
++    
++    def get_ltd_modulation(self) -> float:
++        """Get LTD modulation based on neuromodulator levels."""
++        # High dopamine reduces forgetting
++        dopamine_protection = 1.0 - self.dopamine_level * 0.3
++        return max(0.1, dopamine_protection)
++
++
+ class SynapticPlasticity:
+     """Manages synaptic plasticity mechanisms."""
+     
+@@ -28,42 +75,66 @@ class SynapticPlasticity:
+         self.n_neurons = n_neurons
+         self.dtype = dtype
+         
+-        # Plasticity parameters - optimized for learning
+-        self.ltp_rate = 0.005     # Long-term potentiation rate (increased for faster learning)
+-        self.ltd_rate = 0.002     # Long-term depression rate (balanced)  
+-        self.decay_rate = 0.003   # Synaptic decay (reduced to preserve learning)
++        # Plasticity parameters - optimized for faster bootstrapping
++        self.base_ltp_rate = 0.01     # Increased base LTP for rapid learning
++        self.base_ltd_rate = 0.004    # Balanced LTD rate
++        self.decay_rate = 0.001       # Reduced decay to preserve learning longer
+         self.pruning_threshold = 0.01  # Below this, connections are pruned
+-        self.formation_threshold = 0.8 # Above this, new connections form
++        self.formation_threshold = 0.6 # Lowered for more exploratory connections
++        
++        # Current rates (will be modulated by maturity and neuromodulators)
++        self.ltp_rate = self.base_ltp_rate
++        self.ltd_rate = self.base_ltd_rate
+         
+-        # Homeostatic parameters - tuned for sparse coding
++        # Homeostatic parameters - gentler for gradual growth
+         self.target_activity = 0.05   # Target 5% activity (sparse coding)
+         self.homeostatic_rate = 0.005  # Moderate homeostatic adjustment
+         
+         # Metaplasticity (learning to learn)
+         self.learning_rate_adaptation = 0.99  # Adapt learning rates
++        
++        # Neuromodulation
++        self.neuromodulator = Neuromodulator(dtype)
+     
+-    @partial(jit, static_argnums=(0,))
+     def update_weights(self, weights: jnp.ndarray, 
+                       pre_activity: jnp.ndarray, 
+                       post_activity: jnp.ndarray,
+-                      eligibility_trace: jnp.ndarray) -> jnp.ndarray:
++                      eligibility_trace: jnp.ndarray,
++                      error_signal: float = 0.0) -> jnp.ndarray:
+         """
+-        Update synaptic weights based on pre/post activity.
++        Update synaptic weights based on pre/post activity with neuromodulation.
+         
+         Implements:
+-        - Hebbian LTP/LTD
++        - Hebbian LTP/LTD with neuromodulation
++        - Error-driven plasticity
+         - Synaptic decay
+         - Homeostatic scaling
+         """
++        # Get neuromodulation factors
++        ltp_modulation = self.neuromodulator.get_ltp_modulation()
++        ltd_modulation = self.neuromodulator.get_ltd_modulation()
++        
++        # Error-driven plasticity: scale LTD based on error signal
++        error_ltd_scaling = 1.0 + abs(error_signal) * 0.5  # Stronger LTD for errors
++        error_ltp_scaling = 1.0 - abs(error_signal) * 0.3 if error_signal < 0 else 1.0
++        
++        # Modulated plasticity rates with error-driven scaling
++        modulated_ltp_rate = self.ltp_rate * ltp_modulation * error_ltp_scaling
++        modulated_ltd_rate = self.ltd_rate * ltd_modulation * error_ltd_scaling
++        
+         # Hebbian plasticity: strengthen when pre and post fire together
+-        hebbian_update = jnp.outer(post_activity, pre_activity) * self.ltp_rate
++        hebbian_update = jnp.outer(post_activity, pre_activity) * modulated_ltp_rate
+         
+         # Anti-Hebbian: weaken when only one fires
+         anti_hebbian = (jnp.outer(post_activity, 1.0 - pre_activity) + 
+-                       jnp.outer(1.0 - post_activity, pre_activity)) * self.ltd_rate
++                       jnp.outer(1.0 - post_activity, pre_activity)) * modulated_ltd_rate
+         
+         # Apply plasticity with eligibility trace
+-        plasticity_update = (hebbian_update - anti_hebbian) * eligibility_trace
++        # For errors, use stronger eligibility trace for better learning
++        error_eligibility_boost = 1.0 + abs(error_signal) * 0.3
++        boosted_eligibility = eligibility_trace * error_eligibility_boost
++        
++        plasticity_update = (hebbian_update - anti_hebbian) * boosted_eligibility
+         
+         # Synaptic decay (prevents runaway growth)
+         decay_update = -weights * self.decay_rate
+@@ -155,14 +226,38 @@ class TokenMapper:
+         return self.token_mappings[token_id]
+     
+     def _create_token_mapping(self, token_id: int):
+-        """Create a new mapping for an unseen token."""
+-        # Find least used neurons
+-        available_neurons = jnp.argsort(self.neuron_usage)[:self.neurons_per_token]
++        """Create a new mapping for an unseen token with semantic clustering."""
++        # Enhanced mapping strategy: consider token relationships
++        available_neurons = jnp.argsort(self.neuron_usage)[:self.neurons_per_token * 2]  # Get more candidates
+         
+-        self.token_mappings[token_id] = available_neurons.tolist()
++        # If possible, try to map related tokens to nearby neurons
++        best_neurons = available_neurons[:self.neurons_per_token]
++        
++        # For learned patterns, try to place them near similar tokens
++        if len(self.token_mappings) > 5:  # If we have some existing mappings
++            # Find recently used tokens (assume higher IDs are more recent)
++            recent_tokens = [tid for tid in self.token_mappings.keys() if tid > max(5, len(self.token_mappings) - 20)]
++            
++            if recent_tokens:
++                # Get neurons used by recent tokens
++                recent_neuron_ranges = []
++                for recent_tid in recent_tokens[-3:]:  # Last 3 recent tokens
++                    recent_neurons = self.token_mappings[recent_tid]
++                    if recent_neurons:
++                        recent_neuron_ranges.extend(recent_neurons)
++                
++                if recent_neuron_ranges:
++                    # Try to find neurons close to recent ones
++                    avg_recent = jnp.mean(jnp.array(recent_neuron_ranges))
++                    # Prefer neurons within a reasonable distance
++                    distances = jnp.abs(available_neurons - avg_recent)
++                    close_indices = jnp.argsort(distances)[:self.neurons_per_token]
++                    best_neurons = available_neurons[close_indices]
++        
++        self.token_mappings[token_id] = best_neurons.tolist()
+         
+         # Update usage
+-        self.neuron_usage = self.neuron_usage.at[jnp.array(available_neurons)].add(1.0)
++        self.neuron_usage = self.neuron_usage.at[jnp.array(best_neurons)].add(1.0)
+     
+     def encode_tokens_to_activity(self, token_ids: List[int]) -> jnp.ndarray:
+         """Convert token sequence to neural activity pattern."""
+@@ -180,7 +275,7 @@ class TokenMapper:
+         return jnp.clip(activity, 0.0, 1.0)
+     
+     def decode_activity_to_tokens(self, activity: jnp.ndarray, top_k: int = 5) -> List[int]:
+-        """Convert neural activity back to likely tokens."""
++        """Convert neural activity back to likely tokens with contextual pause insertion."""
+         token_activities = {}
+         
+         for token_id, neurons in self.token_mappings.items():
+@@ -189,7 +284,34 @@ class TokenMapper:
+         
+         # Get top-k most active tokens
+         sorted_tokens = sorted(token_activities.items(), key=lambda x: x[1], reverse=True)
+-        return [token_id for token_id, activity in sorted_tokens[:top_k]]
++        candidate_tokens = [token_id for token_id, activity in sorted_tokens[:top_k]]
++        
++        # Post-process to intelligently insert pause tokens
++        if len(candidate_tokens) >= 2:
++            # Check if we should insert a pause between content tokens
++            top_token_activities = [token_activities[tid] for tid in candidate_tokens[:2]]
++            
++            # If two content tokens have high but similar activity, suggest pause insertion
++            if (len(top_token_activities) >= 2 and 
++                abs(top_token_activities[0] - top_token_activities[1]) < 0.2 and
++                all(tid != 4 for tid in candidate_tokens[:2])):  # Not already pause tokens
++                
++                # Insert pause token with moderate priority
++                if 4 not in candidate_tokens:
++                    candidate_tokens.insert(1, 4)  # Insert at position 1 for moderate priority
++                elif candidate_tokens.index(4) > 2:
++                    # Move pause token to higher priority if it's too low
++                    candidate_tokens.remove(4)
++                    candidate_tokens.insert(1, 4)
++        
++        # Ensure pause token gets reasonable representation
++        if 4 in self.token_mappings and 4 not in candidate_tokens:
++            # Add pause token if it has any activity
++            pause_activity = token_activities.get(4, 0.0)
++            if pause_activity > 0.01:  # Threshold for minimal activity
++                candidate_tokens.append(4)
++        
++        return candidate_tokens[:top_k]
+ 
+ 
+ class PlasticHebSNN(HebSNN):
+@@ -242,6 +364,12 @@ class PlasticHebSNN(HebSNN):
+         # Current activity for tracking
+         self.current_activity = jnp.zeros(self.n_neurons, dtype=self.dtype)
+         
++        # Memory replay mechanism
++        self.replay_buffer = []  # Store successful sequences for consolidation
++        self.replay_buffer_size = 50
++        self.replay_interval = 50  # Replay every 50 steps
++        self.last_replay_step = 0
++        
+         print(f"PlasticHebSNN initialized:")
+         print(f"  Fixed neurons: {self.n_neurons:,}")
+         print(f"  Vocab capacity: {vocab_size:,}")
+@@ -367,6 +495,9 @@ class PlasticHebSNN(HebSNN):
+         """Apply plasticity updates based on activity sequence."""
+         self.learning_step += 1
+         
++        # Update adaptive plasticity rates based on maturity
++        self._update_adaptive_plasticity_rates()
++        
+         # Update eligibility trace (decaying memory of recent activity)
+         if len(activity_sequence) >= 2:
+             pre_activity = activity_sequence[-2]
+@@ -378,56 +509,74 @@ class PlasticHebSNN(HebSNN):
+             # Update eligibility trace with decay
+             self.eligibility_trace = self.eligibility_trace * 0.9 + jnp.outer(post_activity, pre_activity) * 0.1
+             
+-            # Apply synaptic plasticity
++            # Apply synaptic plasticity with error signal
++            error_signal = getattr(self, 'current_error_signal', 0.0)
+             self.synaptic_weights = self.plasticity.update_weights(
+                 self.synaptic_weights,
+                 pre_activity,
+                 post_activity, 
+-                self.eligibility_trace
++                self.eligibility_trace,
++                error_signal
+             )
+             
+-            # Log weight changes to verify plasticity is working
++            # Log weight changes to verify plasticity is working (only in debug mode)
+             weight_change = jnp.sum(jnp.abs(self.synaptic_weights - old_weights))
+-            if self.learning_step % 10 == 0:  # Log every 10 steps to avoid spam
++            if hasattr(self, '_debug_mode') and self._debug_mode and self.learning_step % 10 == 0:
+                 print(f"Step {self.learning_step}: Weight change sum = {float(weight_change):.6f}")
+             
+-            # Apply connectivity cap to prevent saturation
++            # Apply gentler connectivity cap to prevent saturation
+             self._apply_connectivity_cap()
+         
+         # Structural plasticity every few steps
+         if self.learning_step % 10 == 0:
+             self._apply_structural_plasticity()
++            
++        # Memory replay for consolidation
++        if self.learning_step - self.last_replay_step >= self.replay_interval:
++            self._perform_memory_replay()
++    
++    def _update_adaptive_plasticity_rates(self):
++        """Update plasticity rates based on network maturity (metaplasticity)."""
++        # Maturity factor: high plasticity early, gradually stabilizing
++        maturity_factor = jnp.exp(-self.learning_step / 200.0)  # Slower decay for extended learning
++        
++        # Update rates with maturity modulation
++        self.plasticity.ltp_rate = self.plasticity.base_ltp_rate * (0.5 + 0.5 * maturity_factor)
++        self.plasticity.ltd_rate = self.plasticity.base_ltd_rate * (0.5 + 0.5 * maturity_factor)
+     
+-    def _apply_connectivity_cap(self, max_connectivity: float = 0.08):
+-        """Apply connectivity cap with sleep-like consolidation."""
++    def _apply_connectivity_cap(self, max_connectivity: float = 0.15):
++        """Apply gentler connectivity cap with sleep-like consolidation."""
+         # Calculate current connectivity
+         non_zero_weights = jnp.abs(self.synaptic_weights) > 0.001
+         current_connectivity = float(jnp.mean(non_zero_weights))
+         
+-        print(f"Current connectivity: {current_connectivity:.3f}")
++        if hasattr(self, '_debug_mode') and self._debug_mode:
++            print(f"Current connectivity: {current_connectivity:.3f}")
+         
+-        # If too connected, trigger "sleep" consolidation
++        # Only trigger sleep consolidation at higher connectivity threshold
+         if current_connectivity > max_connectivity:
+-            print(f"🛌 Network entering sleep mode (connectivity: {current_connectivity:.1%})")
++            if hasattr(self, '_debug_mode') and self._debug_mode:
++                print(f"🛌 Network entering sleep mode (connectivity: {current_connectivity:.1%})")
+             self.synaptic_weights = self._sleep_consolidation()
+             
+             # Verify reduction
+             new_connectivity = float(jnp.mean(jnp.abs(self.synaptic_weights) > 0.001))
+-            print(f"After sleep: {new_connectivity:.1%} connectivity")
++            if hasattr(self, '_debug_mode') and self._debug_mode:
++                print(f"After sleep: {new_connectivity:.1%} connectivity")
+     
+     def _sleep_consolidation(self):
+-        """Sleep-like consolidation: strengthen important connections, prune weak ones."""
+-        # Sleep mechanism: only keep the most important connections
++        """Gentler sleep-like consolidation: strengthen important connections, prune weak ones."""
++        # Sleep mechanism: keep more connections for gradual learning
+         weight_magnitude = jnp.abs(self.synaptic_weights)
+         
+-        # Top 5% of connections survive (biological sparsity)
+-        survival_threshold = jnp.percentile(weight_magnitude, 95)
++        # Top 15% of connections survive (gentler pruning for gradual growth)
++        survival_threshold = jnp.percentile(weight_magnitude, 85)
+         survival_mask = weight_magnitude >= survival_threshold
+         
+-        # Apply sleep consolidation
++        # Apply gentler sleep consolidation
+         consolidated_weights = jnp.where(
+             survival_mask,
+-            self.synaptic_weights * 1.1,  # Strengthen survivors slightly
++            self.synaptic_weights * 1.05,  # Slight strengthening
+             jnp.zeros_like(self.synaptic_weights)  # Prune the rest
+         )
+         
+@@ -447,7 +596,7 @@ class PlasticHebSNN(HebSNN):
+                 jnp.abs(correlations)
+             )
+     
+-    def generate_tokens(self, context_tokens: List[int], max_length: int = 10) -> List[int]:
++    def generate_tokens(self, context_tokens: List[int], max_length: int = 10, learning: bool = False) -> List[int]:
+         """Generate tokens based on current network state with sparse coding support."""
+         generated = context_tokens.copy()
+         
+@@ -456,8 +605,8 @@ class PlasticHebSNN(HebSNN):
+             return self._generate_babbling(max_length=3)
+         
+         for _ in range(max_length):
+-            # Process current context
+-            result = self.process_tokens(generated[-6:], learning=False)  # Shorter context for sparse nets
++            # Process current context WITH exploration plasticity if enabled
++            result = self.process_tokens(generated[-6:], learning=learning)  # Enable plasticity during generation
+             
+             # Decode activity to get next token
+             next_tokens = self.token_mapper.decode_activity_to_tokens(result['activity'], top_k=10)
+@@ -467,12 +616,28 @@ class PlasticHebSNN(HebSNN):
+                 # Use a gentler decay that doesn't heavily penalize later positions
+                 weights = jnp.array([0.9 ** i for i in range(len(next_tokens))])
+                 
+-                # Give PAUSE tokens (ID 4) a significant boost if they're in the list
+-                # This is important for natural speech generation with proper pauses
++                # Enhanced pause token boosting strategy
+                 if 4 in next_tokens:
+                     pause_idx = next_tokens.index(4)
+-                    # Give PAUSE tokens a much stronger boost to ensure they get selected
+-                    weights = weights.at[pause_idx].set(weights[pause_idx] * 3.0)
++                    
++                    # Check if we haven't generated a pause recently
++                    recent_pause_count = sum(1 for t in generated[-3:] if t == 4)
++                    
++                    # Boost pause tokens more aggressively if no recent pauses
++                    if recent_pause_count == 0:
++                        # Strong boost if no pauses in recent context
++                        weights = weights.at[pause_idx].set(weights[pause_idx] * 5.0)
++                    else:
++                        # Moderate boost if we have recent pauses
++                        weights = weights.at[pause_idx].set(weights[pause_idx] * 2.0)
++                
++                # Temperature scaling for pause insertion
++                # If no pause in last 3 tokens, use lower temperature (more decisive)
++                if len(generated) >= 3 and all(t != 4 for t in generated[-3:]):
++                    # Lower temperature makes pause tokens more likely to be selected
++                    if 4 in next_tokens:
++                        pause_idx = next_tokens.index(4)
++                        weights = weights.at[pause_idx].set(weights[pause_idx] * 2.0)
+                 
+                 # Add a minimum weight floor to prevent any token from being too unlikely
+                 min_weight = jnp.max(weights) * 0.1  # At least 10% of the max weight
+@@ -499,29 +664,106 @@ class PlasticHebSNN(HebSNN):
+         
+         return generated
+     
++    def add_to_replay_buffer(self, token_sequence: List[int], reward: float = 0.0):
++        """Add a token sequence to the replay buffer for consolidation."""
++        if len(token_sequence) > 0:
++            replay_entry = {
++                'tokens': token_sequence,
++                'reward': reward,
++                'timestamp': self.learning_step,
++                'surprise': abs(reward)  # Use absolute reward as surprise signal
++            }
++            
++            self.replay_buffer.append(replay_entry)
++            
++            # Keep buffer size manageable
++            if len(self.replay_buffer) > self.replay_buffer_size:
++                # Remove oldest entries, but preferentially keep high-reward ones
++                sorted_buffer = sorted(self.replay_buffer, key=lambda x: x['reward'], reverse=True)
++                self.replay_buffer = sorted_buffer[:self.replay_buffer_size]
++    
++    def _perform_memory_replay(self):
++        """Perform memory replay for offline consolidation."""
++        if not self.replay_buffer:
++            return
++            
++        self.last_replay_step = self.learning_step
++        
++        # Sample sequences for replay based on surprise/reward
++        replay_candidates = sorted(self.replay_buffer, key=lambda x: x['surprise'], reverse=True)
++        num_replays = min(5, len(replay_candidates))  # Replay top 5 sequences
++        
++        # Store original plasticity rates
++        original_ltp = self.plasticity.ltp_rate
++        original_ltd = self.plasticity.ltd_rate
++        
++        # Reduce plasticity during replay (consolidation, not new learning)
++        self.plasticity.ltp_rate *= 0.8
++        self.plasticity.ltd_rate *= 0.8
++        
++        if hasattr(self, '_debug_mode') and self._debug_mode:
++            print(f"🌙 Memory replay: consolidating {num_replays} sequences")
++        
++        for i in range(num_replays):
++            entry = replay_candidates[i]
++            
++            # Replay the sequence
++            replay_result = self.process_tokens(entry['tokens'], learning=True)
++            
++            # Additional consolidation for high-reward sequences
++            if entry['reward'] > 0.5:
++                # Strengthen pathways for highly rewarded sequences
++                self.plasticity.ltp_rate *= 1.2
++                self.process_tokens(entry['tokens'], learning=True)
++                self.plasticity.ltp_rate /= 1.2
++        
++        # Restore original plasticity rates
++        self.plasticity.ltp_rate = original_ltp
++        self.plasticity.ltd_rate = original_ltd
++    
+     def _add_tonic_activity(self, activity: jnp.ndarray, step: int) -> jnp.ndarray:
+         """
+         Add tonic (baseline) activity for early learning, like baby brains.
+         
+         Real baby brains have spontaneous baseline firing that helps bootstrap learning.
+         This activity decreases as the network matures and learns patterns.
++        Now adaptive to vocabulary growth for better exploration.
+         """
+-        # Tonic activity strength decreases with learning experience
+-        maturity_factor = jnp.exp(-self.learning_step / 50.0)  # Decays over ~50 learning steps
+-        tonic_strength = 0.3 * maturity_factor  # Start at 30% baseline, decay to ~0%
++        # Get current vocabulary size for adaptive scaling
++        current_vocab_size = len(self.token_mapper.token_mappings)
++        
++        # Adaptive tonic strength based on vocabulary growth
++        # Higher noise for low vocab (exploration), lower for high vocab (refinement)
++        vocab_factor = jnp.exp(-current_vocab_size / 50.0)  # Decays as vocab grows
++        maturity_factor = jnp.exp(-self.learning_step / 100.0)  # Slower decay for extended learning
++        
++        # Combine factors for adaptive exploration
++        base_tonic_strength = 0.1 * vocab_factor + 0.03 * maturity_factor
+         
++        # Additional boost for very early learning (first 10 steps)
++        if self.learning_step < 10:
++            base_tonic_strength *= 2.0
++        
++        # Scale down if we have sufficient vocabulary
++        if current_vocab_size > 100:
++            base_tonic_strength *= 0.5
++            
+         # Generate consistent tonic pattern (not random each time)
+         tonic_seed = self.learning_step // 10 + step  # Changes slowly
+         key = jax.random.PRNGKey(tonic_seed)
+         
+-        # Create tonic baseline activity
+-        tonic_pattern = jax.random.uniform(key, activity.shape, dtype=self.dtype) * tonic_strength
++        # Create gentle tonic baseline activity
++        tonic_pattern = jax.random.uniform(key, activity.shape, dtype=self.dtype) * base_tonic_strength
+         
+         # Add tonic activity to existing activity
+         enhanced_activity = activity + tonic_pattern
+         
+         return enhanced_activity
+     
++    def set_error_signal(self, error: float):
++        """Set current error signal for error-driven plasticity."""
++        self.current_error_signal = error
++    
+     def _generate_babbling(self, max_length: int = 3) -> List[int]:
+         """Generate baby-like babbling sounds for early learning."""
+         # Get available tokens, preferring higher IDs (learned patterns)
+diff --git a/experiments/conversational_learning/plastic_learner.py b/experiments/conversational_learning/plastic_learner.py
+index 2a556be..45218ce 100644
+--- a/experiments/conversational_learning/plastic_learner.py
++++ b/experiments/conversational_learning/plastic_learner.py
+@@ -140,10 +140,11 @@ class PlasticContinualLearner:
+     
+     def process_input_and_respond(self, input_text: str) -> str:
+         """
+-        Process input and generate response with real-time plasticity.
++        Process input and generate response with real-time plasticity and adaptive teacher feedback.
+         
+         This is where the key difference is: instead of growing the network,
+-        we change the synaptic connections through plasticity.
++        we change the synaptic connections through plasticity. Now enhanced with
++        adaptive teacher integration for continuous symbiotic learning.
+         """
+         self.total_interactions += 1
+         
+@@ -153,23 +154,39 @@ class PlasticContinualLearner:
+         # Learn from input through plasticity (not network growth!)
+         self._learn_through_plasticity(input_text)
+         
++        # Update teacher with current network state for adaptive prompting
++        if self.total_interactions % 10 == 0:  # Every 10 interactions to avoid overhead
++            network_stats = self.get_learning_stats()
++            simplified_stats = {
++                'vocabulary_size': network_stats['vocabulary_size'],
++                'connectivity': network_stats['connectivity'],
++                'active_neurons': network_stats['active_neurons'],
++                'plasticity_step': network_stats['plasticity_step'],
++                'maturity_factor': network_stats.get('maturity_factor', 1.0)
++            }
++            self.teacher.set_learner_stats(simplified_stats)
++        
+         # Generate response using current network state
+         response = self._generate_plastic_response(input_text)
+         
+         # Record response
+         self.current_conversation.append({"role": "learner", "text": response})
+         
+-        # Get teacher feedback
++        # Get adaptive teacher feedback (now enhanced with progress tracking)
+         teacher_feedback = self.teacher.respond_to_student(response)
+         self.current_conversation.append({"role": "teacher", "text": teacher_feedback})
+         
+         # Learn from feedback through plasticity
+         self._learn_from_feedback_plastic(response, teacher_feedback)
+         
+-        # Monitor plasticity changes
++        # Monitor plasticity changes and auto-adjust if needed
+         if self.total_interactions % 5 == 0:
+             self._monitor_plasticity()
+         
++        # Auto-adjust learning parameters based on progress
++        if self.total_interactions % 100 == 0:
++            self._auto_adjust_learning_rates()
++        
+         # Save network state more frequently
+         if self.total_interactions % self.config.network_save_interval == 0:
+             self._save_network_state()
+@@ -178,9 +195,14 @@ class PlasticContinualLearner:
+         if self.total_interactions % self.config.save_interval == 0:
+             self._save_memory()
+         
++        # Log with enhanced metrics
++        teacher_metrics = self.teacher.get_learning_metrics()
+         self.logger.info(f"Input: {input_text}")
+         self.logger.info(f"Learner: {response}")
+         self.logger.info(f"Teacher: {teacher_feedback}")
++        self.logger.info(f"Teacher metrics - Stage: {teacher_metrics['current_stage']}, "
++                        f"Vocab: {teacher_metrics['vocabulary_size']}, "
++                        f"Improvement streak: {teacher_metrics['improvement_streak']}")
+         
+         return response
+     
+@@ -243,12 +265,25 @@ class PlasticContinualLearner:
+             recent_context = self._get_conversation_context()
+             context_tokens = self.tokenizer.encode(recent_context, add_special_tokens=False)
+             
+-            # Generate using current plastic network state
++            # Generate using current plastic network state WITH exploration plasticity
++            # Store original plasticity rates
++            original_ltp = self.network.plasticity.ltp_rate
++            original_ltd = self.network.plasticity.ltd_rate
++            
++            # Enable reduced plasticity during generation for exploration
++            self.network.plasticity.ltp_rate *= 0.5  # Reduced learning during exploration
++            self.network.plasticity.ltd_rate *= 0.5  # Reduced forgetting during exploration
++            
+             generated_tokens = self.network.generate_tokens(
+                 context_tokens[-8:],  # Recent context
+-                max_length=8         # Short responses
++                max_length=8,        # Short responses
++                learning=True        # Enable exploration plasticity
+             )
+             
++            # Restore original plasticity rates
++            self.network.plasticity.ltp_rate = original_ltp
++            self.network.plasticity.ltd_rate = original_ltd
++            
+             # Remove context to get just the response
+             if len(generated_tokens) > len(context_tokens):
+                 response_tokens = generated_tokens[len(context_tokens):]
+@@ -311,8 +346,9 @@ class PlasticContinualLearner:
+         """
+         Learn from teacher feedback through plasticity adjustments.
+         
+-        Positive feedback strengthens recent synaptic changes.
+-        Negative feedback weakens them.
++        Key improvement: Implement reward-modulated replay that directly
++        associates context with response based on feedback valence.
++        Enhanced with special reinforcement for proper pause usage.
+         """
+         # Analyze feedback sentiment
+         positive_indicators = ["good", "great", "yes", "right", "nice", "excellent"]
+@@ -322,26 +358,113 @@ class PlasticContinualLearner:
+         is_positive = any(pos in feedback_lower for pos in positive_indicators)
+         is_negative = any(neg in feedback_lower for neg in negative_indicators)
+         
+-        # Encode feedback for plasticity
+-        feedback_tokens = self.tokenizer.encode(feedback)
+-        
+-        if feedback_tokens:
+-            # Process feedback with plasticity modulation
+-            if is_positive:
+-                # Strengthen recent plasticity changes
+-                self.network.plasticity.ltp_rate *= 1.1  # Boost learning rate temporarily
+-                self.logger.debug("Positive feedback: boosting plasticity")
++        # Special reinforcement for pause usage
++        response_has_spaces = ' ' in response.strip()
++        feedback_mentions_clarity = any(word in feedback_lower for word in 
++                                      ["clear", "space", "pause", "better", "easier", "understand"])
++        
++        # Boost positive feedback if response has proper spacing
++        if is_positive and response_has_spaces:
++            is_positive = "enhanced_positive"  # Mark for stronger reinforcement
++            self.logger.debug("Enhanced positive feedback for spaced response")
++        
++        # Provide corrective feedback if response lacks spaces but should have them
++        if not response_has_spaces and feedback_mentions_clarity:
++            # Artificial negative signal for concatenated responses
++            is_negative = True
++            self.logger.debug("Negative signal for concatenated response")
++        
++        # CRITICAL IMPROVEMENT: Reward-modulated replay for context-response associations
++        context = self._get_conversation_context()
++        context_tokens = self.tokenizer.encode(context)
++        response_tokens = self.tokenizer.encode(response)
++        
++        # Create combined context + response sequence for joint learning
++        combined_tokens = context_tokens + response_tokens
++        
++        # Update neuromodulation based on feedback
++        if is_positive == "enhanced_positive":
++            reward_signal = 1.0  # Strong reward for spaced responses
++            novelty_signal = 0.5  # Moderate novelty
++        elif is_positive:
++            reward_signal = 0.7  # Good reward
++            novelty_signal = 0.3  # Some novelty
++        elif is_negative:
++            reward_signal = -0.5  # Negative reward
++            novelty_signal = 0.8  # High novelty (need to learn)
++        else:
++            reward_signal = 0.0  # Neutral
++            novelty_signal = 0.2  # Low novelty
++            
++        # Update neuromodulators
++        self.network.plasticity.neuromodulator.update_dopamine(reward_signal)
++        self.network.plasticity.neuromodulator.update_acetylcholine(novelty_signal)
++        
++        # Set error signal for error-driven plasticity
++        if is_negative:
++            self.network.set_error_signal(-reward_signal)  # Negative error for wrong responses
++        else:
++            self.network.set_error_signal(0.0)  # No error for correct responses
++        
++        if combined_tokens:
++            # Store original plasticity rates
++            original_ltp = self.network.plasticity.ltp_rate
++            original_ltd = self.network.plasticity.ltd_rate
++            
++            # Modulate plasticity based on feedback valence
++            if is_positive == "enhanced_positive":
++                # Extra strong reinforcement for spaced responses
++                self.network.plasticity.ltp_rate *= 2.0  # Strong boost for good spaced responses
++                self.network.plasticity.ltd_rate *= 0.6  # Minimal forgetting
++                self.logger.debug("Enhanced positive feedback: strongly reinforcing spaced response")
++                
++                # Specifically strengthen pathways leading to pause tokens
++                pause_tokens = self.tokenizer.encode(' ')  # Get pause token representations
++                if pause_tokens:
++                    # Process pause tokens with extra strengthening
++                    self.network.process_tokens(pause_tokens, learning=True)
++                    
++            elif is_positive:
++                # Strengthen context-response pathway for good responses
++                self.network.plasticity.ltp_rate *= 1.5  # Boost learning significantly
++                self.network.plasticity.ltd_rate *= 0.8  # Reduce forgetting
++                self.logger.debug("Positive feedback: strengthening context-response pathway")
+             elif is_negative:
+-                # Weaken recent changes
+-                self.network.plasticity.ltd_rate *= 1.1  # Boost forgetting temporarily
+-                self.logger.debug("Negative feedback: increasing forgetting")
++                # Weaken context-response pathway for bad responses
++                self.network.plasticity.ltp_rate *= 0.7  # Reduce learning
++                self.network.plasticity.ltd_rate *= 1.5  # Boost forgetting
++                self.logger.debug("Negative feedback: weakening context-response pathway")
++                
++                # If response lacked spaces, specifically weaken non-pause pathways
++                if not response_has_spaces:
++                    # Gentle weakening of concatenated patterns
++                    self.network.plasticity.ltd_rate *= 1.2  # Slight additional forgetting
++                    self.logger.debug("Weakening concatenated response patterns")
++            
++            # Process the combined sequence to create direct associations
++            self.network.process_tokens(combined_tokens, learning=True)
+             
+-            # Process feedback through network
++            # Reset plasticity rates
++            self.network.plasticity.ltp_rate = original_ltp
++            self.network.plasticity.ltd_rate = original_ltd
++        
++        # Now process feedback separately (teacher correction patterns)
++        feedback_tokens = self.tokenizer.encode(feedback)
++        if feedback_tokens:
++            # Always learn from teacher feedback with slight LTP boost (corrections)
++            self.network.plasticity.ltp_rate *= 1.2
+             self.network.process_tokens(feedback_tokens, learning=True)
++            self.network.plasticity.ltp_rate /= 1.2
+             
+-            # Reset learning rates to baseline
+-            self.network.plasticity.ltp_rate *= 0.99
+-            self.network.plasticity.ltd_rate *= 0.99
++        # Add successful sequences to replay buffer for consolidation
++        if combined_tokens:
++            if is_positive == "enhanced_positive":
++                self.network.add_to_replay_buffer(combined_tokens, reward=1.0)
++            elif is_positive:
++                self.network.add_to_replay_buffer(combined_tokens, reward=0.7)
++            elif is_negative:
++                # Still add negative examples for learning, but with negative reward
++                self.network.add_to_replay_buffer(combined_tokens, reward=-0.3)
+         
+         # Record association
+         if response not in self.learned_associations:
+@@ -384,8 +507,9 @@ class PlasticContinualLearner:
+             self.network.plasticity.homeostatic_rate *= 1.1
+     
+     def _save_memory(self):
+-        """Save learner's plasticity state."""
++        """Save learner's plasticity state and teacher adaptive metrics."""
+         plasticity_stats = self.network.get_plasticity_stats()
++        teacher_metrics = self.teacher.get_learning_metrics()
+         
+         memory_data = {
+             'conversation_count': self.conversation_count,
+@@ -395,10 +519,16 @@ class PlasticContinualLearner:
+             'plasticity_stats': plasticity_stats,
+             'tokenizer_stats': self.tokenizer.get_pattern_stats(),
+             'teacher_stage': self.teacher.current_stage,
++            'teacher_metrics': teacher_metrics,  # Enhanced teacher tracking
+             'network_config': {
+                 'n_neurons': self.network.n_neurons,
+                 'learning_step': self.network.learning_step
+             },
++            'symbiotic_learning': {
++                'teacher_learner_vocab_ratio': teacher_metrics['vocabulary_size'] / max(1, self.tokenizer.get_vocab_size()),
++                'plasticity_teacher_alignment': plasticity_stats['weights']['connectivity'] * teacher_metrics['improvement_streak'],
++                'adaptive_feedback_quality': teacher_metrics.get('vocabulary_growth_rate', 0.0)
++            },
+             'timestamp': time.time()
+         }
+         
+@@ -410,7 +540,13 @@ class PlasticContinualLearner:
+         vocab_file = self.config.memory_file.replace('.json', '_vocab.json')
+         self.tokenizer.save_vocabulary(vocab_file)
+         
+-        self.logger.info(f"Plastic memory saved: {self.conversation_count} conversations")
++        # Save teacher conversation state
++        teacher_conversation_file = self.config.memory_file.replace('.json', '_teacher_conversation.json')
++        self.teacher.save_conversation(teacher_conversation_file)
++        
++        self.logger.info(f"Plastic memory saved: {self.conversation_count} conversations, "
++                        f"Teacher stage: {teacher_metrics['current_stage']}, "
++                        f"Symbiotic alignment: {memory_data['symbiotic_learning']['plasticity_teacher_alignment']:.3f}")
+     
+     def _save_network_state(self):
+         """Save the network's synaptic state."""
+@@ -457,6 +593,12 @@ class PlasticContinualLearner:
+             else:
+                 self.logger.info("No network state found, starting with fresh synapses")
+             
++            # Load teacher conversation state
++            teacher_conversation_file = memory_file.replace('.json', '_teacher_conversation.json')
++            if Path(teacher_conversation_file).exists():
++                self.teacher.load_conversation(teacher_conversation_file)
++                self.logger.info("Teacher conversation state restored")
++            
+             self.logger.info(f"Plastic memory loaded: {self.conversation_count} conversations")
+             
+         except FileNotFoundError:
+@@ -465,10 +607,32 @@ class PlasticContinualLearner:
+             self.logger.warning(f"Failed to load memory: {e}")
+     
+     def get_learning_stats(self) -> Dict:
+-        """Get comprehensive learning statistics."""
++        """Get comprehensive learning statistics with enhanced monitoring."""
+         plasticity_stats = self.network.get_plasticity_stats()
+         tokenizer_stats = self.tokenizer.get_pattern_stats()
+         
++        # Calculate additional learning metrics
++        weight_change_norm = 0.0
++        if len(self.plasticity_events) >= 2:
++            recent_connectivity = [event['stats']['weights']['connectivity'] for event in self.plasticity_events[-5:]]
++            weight_change_norm = np.std(recent_connectivity) if len(recent_connectivity) > 1 else 0.0
++        
++        # Response-feedback similarity for credit assignment monitoring
++        response_feedback_overlap = 0.0
++        if self.learned_associations:
++            recent_associations = list(self.learned_associations.items())[-10:]
++            overlaps = []
++            for response, feedback_list in recent_associations:
++                for feedback_data in feedback_list[-3:]:  # Recent feedback for this response
++                    feedback = feedback_data['feedback']
++                    # Simple token overlap measure
++                    response_tokens = set(self.tokenizer.encode(response))
++                    feedback_tokens = set(self.tokenizer.encode(feedback))
++                    if response_tokens and feedback_tokens:
++                        overlap = len(response_tokens & feedback_tokens) / len(response_tokens | feedback_tokens)
++                        overlaps.append(overlap)
++            response_feedback_overlap = np.mean(overlaps) if overlaps else 0.0
++        
+         return {
+             'conversations': self.conversation_count,
+             'total_interactions': self.total_interactions,
+@@ -481,5 +645,32 @@ class PlasticContinualLearner:
+             'teacher_stage': self.teacher.current_stage,
+             'tokenizer_stats': tokenizer_stats,
+             'plasticity_events': len(self.plasticity_events),
+-            'recent_plasticity': self.plasticity_events[-3:] if self.plasticity_events else []
+-        }
+\ No newline at end of file
++            'recent_plasticity': self.plasticity_events[-3:] if self.plasticity_events else [],
++            # Enhanced monitoring metrics
++            'weight_change_norm': weight_change_norm,
++            'response_feedback_overlap': response_feedback_overlap,
++            'maturity_factor': plasticity_stats.get('maturity_factor', 1.0),
++            'tonic_strength': plasticity_stats.get('tonic_strength', 0.0),
++            'current_ltp_rate': self.network.plasticity.ltp_rate,
++            'current_ltd_rate': self.network.plasticity.ltd_rate
++        }
++    
++    def _auto_adjust_learning_rates(self):
++        """Auto-adjust learning rates based on progress monitoring."""
++        stats = self.get_learning_stats()
++        
++        # If responses don't show good overlap with feedback after many turns, boost rates
++        if (self.total_interactions > 1000 and 
++            stats['response_feedback_overlap'] < 0.2 and 
++            stats['learned_associations'] < 10):
++            
++            self.network.plasticity.base_ltp_rate *= 1.1
++            self.network.plasticity.base_ltd_rate *= 1.05
++            self.logger.info(f"Auto-boosted learning rates: LTP={self.network.plasticity.base_ltp_rate:.4f}")
++        
++        # If connectivity stays too low for too long, reduce decay
++        if (stats['connectivity'] < 0.03 and 
++            self.total_interactions > 500):
++            
++            self.network.plasticity.decay_rate *= 0.9
++            self.logger.info(f"Reduced decay rate to {self.network.plasticity.decay_rate:.4f}")
+\ No newline at end of file
+diff --git a/experiments/conversational_learning/utils/biologically_inspired_tokenizer.py b/experiments/conversational_learning/utils/biologically_inspired_tokenizer.py
+index 186b6a7..cd0fcea 100644
+--- a/experiments/conversational_learning/utils/biologically_inspired_tokenizer.py
++++ b/experiments/conversational_learning/utils/biologically_inspired_tokenizer.py
+@@ -167,7 +167,8 @@ class BiologicalTokenizer:
+             self.pattern_combinations[segments[i]][segments[i + 1]] += 1
+             
+             # For patterns without PAUSE, require more frequency
+-            min_frequency = 3 if '<PAUSE>' not in bigram else 2
++            # PAUSE patterns are prioritized with lower frequency requirements
++            min_frequency = 3 if '<PAUSE>' not in bigram else 1
+             
+             # If this combination is frequent enough, consider it a new pattern
+             if (len(bigram) <= 8 and  # Reasonable length (allow longer for PAUSE patterns)
+@@ -187,6 +188,7 @@ class BiologicalTokenizer:
+             self.pattern_combinations[trigram]['_trigram_count'] += 1
+             
+             # For patterns with PAUSE, require lower frequency
++            # PAUSE patterns are learned more aggressively
+             min_frequency = 2 if '<PAUSE>' not in trigram else 1
+             
+             # Learn trigram if frequent enough
+@@ -198,12 +200,18 @@ class BiologicalTokenizer:
+                 self._add_new_pattern(trigram)
+     
+     def _add_new_pattern(self, pattern: str):
+-        """Add a new learned pattern to the vocabulary."""
++        """Add a new learned pattern to the vocabulary with priority for pause patterns."""
+         new_id = len(self.pattern_to_id)
+         self.pattern_to_id[pattern] = new_id
+         self.id_to_pattern[new_id] = pattern
+         
+-        print(f"Learned new pattern: '{pattern}' (id: {new_id})")
++        # Give extra boost to patterns containing pause tokens
++        if '<PAUSE>' in pattern:
++            # Immediately increase usage to prioritize pause patterns
++            self.pattern_usage[pattern] += 5  # Boost usage count
++            print(f"Learned new PAUSE pattern: '{pattern}' (id: {new_id}) - PRIORITIZED")
++        else:
++            print(f"Learned new pattern: '{pattern}' (id: {new_id})")
+     
+     def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
+         """Encode text to token IDs using biological segmentation."""
+@@ -268,7 +276,9 @@ class BiologicalTokenizer:
+         # Find rarely used patterns
+         patterns_to_remove = []
+         for pattern, usage in self.pattern_usage.items():
+-            if usage < min_usage and pattern not in self.special_tokens:
++            if (usage < min_usage and 
++                pattern not in self.special_tokens and 
++                '<PAUSE>' not in pattern):  # Protect pause patterns from removal
+                 patterns_to_remove.append(pattern)
+         
+         # Remove rarely used patterns (keeping space for new ones)
+@@ -291,7 +301,8 @@ class BiologicalTokenizer:
+                     continue
+                     
+                 # Allow PAUSE patterns but require lower frequency
+-                min_count = 3 if '<PAUSE>' not in (first_pattern + second_pattern) else 2
++                # Prioritize pause patterns with even lower requirements
++                min_count = 3 if '<PAUSE>' not in (first_pattern + second_pattern) else 1
+                 
+                 if count >= min_count:  # Frequently seen together
+                     new_pattern = first_pattern + second_pattern
+diff --git a/experiments/conversational_learning/utils/llm_teacher.py b/experiments/conversational_learning/utils/llm_teacher.py
+index fdfca5a..fe74e89 100644
+--- a/experiments/conversational_learning/utils/llm_teacher.py
++++ b/experiments/conversational_learning/utils/llm_teacher.py
+@@ -3,6 +3,7 @@ LLM Teacher Interface
+ 
+ Simplified teacher that acts as a parent helping a child learn to talk.
+ Uses a single adaptive system prompt and maintains conversation history.
++Enhanced with dynamic progress tracking and adaptive feedback for continuous learning.
+ """
+ 
+ import requests
+@@ -11,6 +12,7 @@ import time
+ import logging
+ from typing import List, Dict, Optional
+ from dataclasses import dataclass
++from collections import Counter
+ 
+ 
+ @dataclass
+@@ -27,13 +29,13 @@ class TeacherConfig:
+ 
+ class LLMTeacher:
+     """
+-    Simplified LLM Teacher that acts like a nurturing parent.
++    Adaptive LLM Teacher that acts like a nurturing parent with dynamic progress tracking.
+     
+-    The teacher naturally adapts to the child's level and provides:
+-    - Encouragement and gentle correction
+-    - Age-appropriate responses
+-    - Natural conversation flow
+-    - Gradual complexity increase
++    The teacher naturally adapts to the child's level through real-time monitoring and provides:
++    - Dynamic progress tracking with adaptive prompting
++    - Repetition and expansion feedback for Hebbian reinforcement
++    - Encouragement and gentle correction based on development stage
++    - Natural conversation flow with continuous complexity adjustment
+     """
+     
+     def __init__(self, config: TeacherConfig = None):
+@@ -42,12 +44,25 @@ class LLMTeacher:
+         self.session_id = int(time.time())
+         self.max_history = 10  # Keep only recent conversation
+         
++        # Dynamic progress tracking for adaptive teaching
++        self.learner_stats = {
++            'avg_response_length': 0.0,
++            'unique_tokens': set(),
++            'improvement_streak': 0,
++            'repeated_errors': Counter(),
++            'total_responses': 0,
++            'vocabulary_growth_rate': 0.0
++        }
++        
++        # Network stats integration (set by learner)
++        self.network_stats = {}
++        
+         # Setup logging
+         logging.basicConfig(level=logging.INFO)
+         self.logger = logging.getLogger(__name__)
+         
+-        # Simple system prompt that adapts naturally
+-        self.system_prompt = """You are a loving, patient parent helping your child learn to talk and communicate. Your child is just beginning to learn language, starting from basic sounds and gradually developing more complex speech.
++        # Base system prompt that gets enhanced adaptively
++        self.base_system_prompt = """You are a loving, patient parent helping your child learn to talk and communicate. Your child is just beginning to learn language, starting from basic sounds and gradually developing more complex speech.
+ 
+ Guidelines for your responses:
+ - Always be encouraging and supportive, celebrating every attempt
+@@ -64,8 +79,107 @@ Start with very simple greetings and sounds, then naturally progress as your chi
+         
+         self.logger.info(f"LLM Teacher initialized with model: {self.config.model}")
+     
++    def _update_learner_stats(self, student_attempt: str):
++        """Update learner statistics for adaptive teaching."""
++        tokens = student_attempt.lower().split()
++        new_length = len(tokens)
++        
++        # Update average response length
++        self.learner_stats['total_responses'] += 1
++        prev_avg = self.learner_stats['avg_response_length']
++        self.learner_stats['avg_response_length'] = (
++            (prev_avg * (self.learner_stats['total_responses'] - 1) + new_length) / 
++            self.learner_stats['total_responses']
++        )
++        
++        # Track vocabulary growth
++        prev_vocab_size = len(self.learner_stats['unique_tokens'])
++        new_unique = set(tokens) - self.learner_stats['unique_tokens']
++        self.learner_stats['unique_tokens'].update(new_unique)
++        new_vocab_size = len(self.learner_stats['unique_tokens'])
++        
++        # Calculate vocabulary growth rate
++        if self.learner_stats['total_responses'] > 1:
++            vocab_growth = new_vocab_size - prev_vocab_size
++            self.learner_stats['vocabulary_growth_rate'] = (
++                self.learner_stats['vocabulary_growth_rate'] * 0.9 + vocab_growth * 0.1
++            )
++        
++        # Track improvement streaks
++        if len(new_unique) > 0 or new_length > prev_avg:
++            self.learner_stats['improvement_streak'] += 1
++        else:
++            self.learner_stats['improvement_streak'] = max(0, self.learner_stats['improvement_streak'] - 1)
++            
++            # Track repeated errors for targeted correction
++            if len(tokens) < 2 or not any(token.isalpha() for token in tokens):
++                self.learner_stats['repeated_errors'][student_attempt] += 1
++    
++    def _get_adaptive_prompt(self) -> str:
++        """Generate adaptive system prompt based on learner progress."""
++        adaptive_prompt = self.base_system_prompt
++        
++        avg_length = self.learner_stats['avg_response_length']
++        improvement = self.learner_stats['improvement_streak']
++        vocab_size = len(self.learner_stats['unique_tokens'])
++        
++        # Stage-specific guidance
++        if avg_length < 2 and vocab_size < 10:
++            adaptive_prompt += "\n\nCURRENT STAGE: The child is in very early stages—focus on simple echoes, sounds, and positive reinforcement. Repeat their sounds back with enthusiasm."
++        elif avg_length < 4 and improvement > 2:
++            adaptive_prompt += "\n\nCURRENT STAGE: The child shows early progress—gently introduce new simple words or ask about colors/animals. Echo and expand their attempts."
++        elif improvement > 5 or vocab_size > 20:
++            adaptive_prompt += "\n\nCURRENT STAGE: The child is developing well—encourage longer phrases and simple conversations about familiar topics."
++        
++        # Handle repeated errors with targeted correction
++        if self.learner_stats['repeated_errors']:
++            common_error = self.learner_stats['repeated_errors'].most_common(1)[0][0]
++            adaptive_prompt += f"\n\nNOTE: The child often attempts '{common_error}'—model gentle corrections and alternatives patiently."
++        
++        # Integrate network stats if available
++        if self.network_stats:
++            vocab = self.network_stats.get('vocabulary_size', 0)
++            conn = self.network_stats.get('connectivity', 0.0)
++            adaptive_prompt += f"\n\nNEURAL STATE: {vocab} patterns learned, {conn:.1%} connectivity—adjust complexity accordingly."
++        
++        return adaptive_prompt
++    
++    def set_learner_stats(self, stats: Dict):
++        """Set learner network statistics for personalized feedback."""
++        self.network_stats = stats
++        self.logger.debug(f"Updated network stats: {stats}")
++    
++    def _enhance_response_with_expansion(self, response: str, student_attempt: str) -> str:
++        """Enhance teacher response with repetition and expansion for Hebbian reinforcement."""
++        if not response or not student_attempt:
++            return response
++        
++        student_lower = student_attempt.lower().strip()
++        response_lower = response.lower()
++        
++        # If student attempt is not echoed in response, add expansion
++        if student_lower not in response_lower and len(student_attempt.split()) > 0:
++            # For positive responses, expand with student's attempt
++            if any(positive in response_lower for positive in ['good', 'yes', 'nice', 'great', 'wonderful']):
++                if len(student_attempt.split()) <= 2:  # Keep expansions simple
++                    response = f"{response} You said '{student_attempt}'!"
++            
++            # For corrections, model the right way
++            elif any(correction in response_lower for correction in ['try', 'no', 'again', 'like']):
++                # Simple modeling based on attempt length
++                if len(student_attempt) < 3:
++                    model = student_attempt.upper()  # Encourage clearer pronunciation
++                else:
++                    model = f"{student_attempt}?"  # Turn into question for clarification
++                
++                # Ensure response stays concise
++                if len(response.split()) < 6:
++                    response = f"{response} Like: '{model}'"
++        
++        return response
++    
+     def _make_api_call(self, messages: List[Dict], **kwargs) -> Optional[str]:
+-        """Make API call to the local LLM with retry logic."""
++        """Make API call to the local LLM with retry logic and fallback."""
+         
+         payload = {
+             "model": self.config.model,
+@@ -96,11 +210,16 @@ Start with very simple greetings and sounds, then naturally progress as your chi
+                 if attempt < self.config.retry_attempts - 1:
+                     time.sleep(self.config.retry_delay)
+         
+-        return None
++        # Fallback response for continuous learning robustness
++        fallback = "Good effort! Try again with me."
++        self.logger.warning("API failed; using encouraging fallback response.")
++        return fallback
+     
+     def _build_messages(self, new_user_message: str = None) -> List[Dict]:
+-        """Build message list with system prompt and recent history."""
+-        messages = [{"role": "system", "content": self.system_prompt}]
++        """Build message list with adaptive system prompt and recent history."""
++        # Use adaptive prompt based on current learner state
++        adaptive_prompt = self._get_adaptive_prompt()
++        messages = [{"role": "system", "content": adaptive_prompt}]
+         
+         # Add recent conversation history (last 10 exchanges)
+         recent_history = self.conversation_history[-self.max_history:]
+@@ -136,23 +255,32 @@ Start with very simple greetings and sounds, then naturally progress as your chi
+             raise Exception("Teacher LLM failed to start conversation - stopping training")
+     
+     def respond_to_student(self, student_attempt: str) -> str:
+-        """Respond to student's attempt at communication."""
++        """Respond to student's attempt with adaptive feedback and expansion."""
++        
++        # Update learner statistics for adaptive teaching
++        self._update_learner_stats(student_attempt)
+         
+-        # Build messages with conversation history
+-        messages = self._build_messages(student_attempt)
++        # Create enhanced user message for better teacher guidance
++        user_msg = f"Student's attempt: '{student_attempt}'. As a patient parent, respond encouragingly: if approximate or good, repeat and expand briefly; if unclear, model a simple correction. Keep to 1-8 words."
++        
++        # Build messages with adaptive conversation history
++        messages = self._build_messages(user_msg)
+         
+         response = self._make_api_call(messages)
+         
+         if response:
++            # Enhance response with repetition and expansion
++            enhanced_response = self._enhance_response_with_expansion(response, student_attempt)
++            
+             # Store the exchange
+             self.conversation_history.append({"role": "user", "content": student_attempt})
+-            self.conversation_history.append({"role": "assistant", "content": response})
++            self.conversation_history.append({"role": "assistant", "content": enhanced_response})
+             
+             # Trim history to keep it manageable
+             self._trim_history()
+             
+-            self.logger.info(f"Student: '{student_attempt}' -> Teacher: '{response}'")
+-            return response
++            self.logger.info(f"Student: '{student_attempt}' -> Teacher: '{enhanced_response}'")
++            return enhanced_response
+         else:
+             raise Exception(f"Teacher LLM failed to respond to student attempt: '{student_attempt}' - stopping training")
+     
+@@ -165,16 +293,18 @@ Start with very simple greetings and sounds, then naturally progress as your chi
+     @property
+     def current_stage(self) -> str:
+         """
+-        Simple stage indicator based on conversation length.
++        Dynamic stage indicator based on learner progress metrics.
+         This maintains compatibility with plastic_learner.py logging.
+         """
+-        conversation_length = len(self.conversation_history)
++        avg_length = self.learner_stats['avg_response_length']
++        vocab_size = len(self.learner_stats['unique_tokens'])
++        improvement = self.learner_stats['improvement_streak']
+         
+-        if conversation_length < 20:
++        if avg_length < 2 and vocab_size < 10:
+             return "beginning"
+-        elif conversation_length < 100:
++        elif avg_length < 4 and vocab_size < 25:
+             return "developing"
+-        elif conversation_length < 300:
++        elif improvement > 3 and vocab_size < 50:
+             return "expanding"
+         else:
+             return "conversational"
+@@ -183,27 +313,60 @@ Start with very simple greetings and sounds, then naturally progress as your chi
+         """Get the conversation history."""
+         return self.conversation_history.copy()
+     
++    def get_learning_metrics(self) -> Dict:
++        """Get detailed learning metrics for analysis."""
++        return {
++            'avg_response_length': self.learner_stats['avg_response_length'],
++            'vocabulary_size': len(self.learner_stats['unique_tokens']),
++            'improvement_streak': self.learner_stats['improvement_streak'],
++            'vocabulary_growth_rate': self.learner_stats['vocabulary_growth_rate'],
++            'total_responses': self.learner_stats['total_responses'],
++            'error_patterns': dict(self.learner_stats['repeated_errors'].most_common(5)),
++            'current_stage': self.current_stage
++        }
++    
+     def reset_conversation(self):
+-        """Reset the conversation state."""
++        """Reset the conversation state and learner statistics."""
+         self.conversation_history = []
+         self.session_id = int(time.time())
+-        self.logger.info("Conversation reset")
++        
++        # Reset learner stats but preserve network stats
++        self.learner_stats = {
++            'avg_response_length': 0.0,
++            'unique_tokens': set(),
++            'improvement_streak': 0,
++            'repeated_errors': Counter(),
++            'total_responses': 0,
++            'vocabulary_growth_rate': 0.0
++        }
++        
++        self.logger.info("Conversation and learner stats reset")
+     
+     def save_conversation(self, filepath: str):
+-        """Save conversation history to file."""
++        """Save conversation history and learning metrics to file."""
+         conversation_data = {
+             "session_id": self.session_id,
+             "current_stage": self.current_stage,
+-            "history": self.conversation_history
++            "history": self.conversation_history,
++            "learner_stats": {
++                'avg_response_length': self.learner_stats['avg_response_length'],
++                'vocabulary_size': len(self.learner_stats['unique_tokens']),
++                'unique_tokens': list(self.learner_stats['unique_tokens']),
++                'improvement_streak': self.learner_stats['improvement_streak'],
++                'vocabulary_growth_rate': self.learner_stats['vocabulary_growth_rate'],
++                'total_responses': self.learner_stats['total_responses'],
++                'repeated_errors': dict(self.learner_stats['repeated_errors'])
++            },
++            "network_stats": self.network_stats
+         }
+         
+         with open(filepath, 'w') as f:
+             json.dump(conversation_data, f, indent=2)
+         
+-        self.logger.info(f"Conversation saved to {filepath}")
++        self.logger.info(f"Conversation and metrics saved to {filepath}")
+     
+     def load_conversation(self, filepath: str):
+-        """Load conversation history from file."""
++        """Load conversation history and learning metrics from file."""
+         try:
+             with open(filepath, 'r') as f:
+                 conversation_data = json.load(f)
+@@ -211,10 +374,23 @@ Start with very simple greetings and sounds, then naturally progress as your chi
+             self.session_id = conversation_data.get("session_id", int(time.time()))
+             self.conversation_history = conversation_data.get("history", [])
+             
++            # Restore learner stats if available
++            if "learner_stats" in conversation_data:
++                saved_stats = conversation_data["learner_stats"]
++                self.learner_stats['avg_response_length'] = saved_stats.get('avg_response_length', 0.0)
++                self.learner_stats['unique_tokens'] = set(saved_stats.get('unique_tokens', []))
++                self.learner_stats['improvement_streak'] = saved_stats.get('improvement_streak', 0)
++                self.learner_stats['vocabulary_growth_rate'] = saved_stats.get('vocabulary_growth_rate', 0.0)
++                self.learner_stats['total_responses'] = saved_stats.get('total_responses', 0)
++                self.learner_stats['repeated_errors'] = Counter(saved_stats.get('repeated_errors', {}))
++            
++            # Restore network stats if available
++            self.network_stats = conversation_data.get("network_stats", {})
++            
+             # Trim loaded history to max size
+             self._trim_history()
+             
+-            self.logger.info(f"Conversation loaded from {filepath}")
++            self.logger.info(f"Conversation and metrics loaded from {filepath}")
+             
+         except (FileNotFoundError, json.JSONDecodeError) as e:
+             self.logger.warning(f"Failed to load conversation: {e}")
+diff --git a/hebbianllm/core/network.py b/hebbianllm/core/network.py
+index 8747a1b..9981deb 100644
+--- a/hebbianllm/core/network.py
++++ b/hebbianllm/core/network.py
+@@ -23,36 +23,75 @@ except ImportError:
+ from typing import Tuple, Dict, Any, Optional, List
+ import numpy as np
+ from functools import partial
++from dataclasses import dataclass, field
++from collections import defaultdict
+ 
+ # Configure JAX for maximum performance
+ jax.config.update('jax_enable_x64', False)  # Use float32 for speed
+ 
+-# Auto-detect and use GPU if available
+-try:
+-    devices = jax.devices('gpu')
+-    if devices:
+-        print(f"GPU backend configured with {len(devices)} GPUs: {devices}")
+-        jax.config.update('jax_default_device', devices[0])
+-        # Enable multi-GPU if available
+-        if len(devices) > 1:
+-            print("Multi-GPU configuration enabled")
+-    else:
+-        print("No GPU found, falling back to CPU")
+-        jax.config.update('jax_platform_name', 'cpu')
+-except:
+-    print("GPU configuration failed, using CPU")
+-    jax.config.update('jax_platform_name', 'cpu')
++# Auto-detect and use GPU if available (temporarily disabled to fix hanging)
++# try:
++#     devices = jax.devices('gpu')
++#     if devices:
++#         print(f"GPU backend configured with {len(devices)} GPUs: {devices}")
++#         jax.config.update('jax_default_device', devices[0])
++#         # Enable multi-GPU if available
++#         if len(devices) > 1:
++#             print("Multi-GPU configuration enabled")
++#     else:
++#         print("No GPU found, falling back to CPU")
++#         jax.config.update('jax_platform_name', 'cpu')
++# except:
++#     print("GPU configuration failed, using CPU")
++#     jax.config.update('jax_platform_name', 'cpu')
+ 
+-# Enable memory and performance optimizations
+-try:
+-    jax.config.update('jax_traceback_filtering', 'off')
+-    jax.config.update('jax_gpu_memory_fraction', 0.8)  # Use 80% of GPU memory
+-    jax.config.update('jax_enable_memories', True)  # Enable memory optimization
+-except:
+-    pass  # Ignore if options not available
++# Enable memory and performance optimizations (temporarily disabled to fix hanging)
++# try:
++#     jax.config.update('jax_traceback_filtering', 'off')
++#     jax.config.update('jax_gpu_memory_fraction', 0.8)  # Use 80% of GPU memory
++#     jax.config.update('jax_enable_memories', True)  # Enable memory optimization
++# except:
++#     pass  # Ignore if options not available
+ 
+ print("High-performance JAX backend configured")
+ 
++
++@dataclass
++class Modulators:
++    """
++    Neuromodulator bus for brain-inspired learning enhancements.
++    
++    Stores neuromodulator concentrations that influence neural dynamics:
++    - 'dopamine' (DA): Reward prediction error, gates learning
++    - 'acetylcholine' (ACh): Attention and input gating  
++    - 'norepinephrine' (NE): Novelty and arousal
++    - 'adenosine' (Ado): Fatigue and sleep pressure
++    - 'serotonin' (5HT): Mood and learning rate
++    """
++    values: Dict[str, float] = field(default_factory=lambda: defaultdict(float))
++    
++    def set_mod(self, name: str, value: float):
++        """Set modulator concentration."""
++        self.values[name] = float(value)
++    
++    def get_mod(self, name: str) -> float:
++        """Get modulator concentration (0.0 if not set)."""
++        return self.values.get(name, 0.0)
++    
++    def decay_mod(self, name: str, tau: float, dt: float = 1.0):
++        """Exponentially decay modulator with time constant tau."""
++        if name in self.values:
++            decay_factor = jnp.exp(-dt / tau)
++            self.values[name] *= float(decay_factor)
++    
++    def reset(self):
++        """Reset all modulators to zero."""
++        self.values.clear()
++    
++    def to_dict(self) -> Dict[str, float]:
++        """Convert to regular dictionary for JAX operations."""
++        return dict(self.values)
++
+ # Memory pool for reusing arrays
+ class MemoryPool:
+     """Memory pool for efficient array reuse."""
+@@ -78,7 +117,7 @@ class MemoryPool:
+ # Global memory pool
+ _memory_pool = MemoryPool()
+ 
+-@jit
++# @jit  # Temporarily disabled to fix hanging import
+ def sparse_event_propagation(active_neurons: jnp.ndarray,
+                            connectivity_matrix: jnp.ndarray,
+                            weights: jnp.ndarray,
+@@ -96,7 +135,7 @@ def sparse_event_propagation(active_neurons: jnp.ndarray,
+     
+     return input_currents
+ 
+-@jit
++# @jit  # Temporarily disabled to fix hanging import
+ def vectorized_lif_dynamics(v: jnp.ndarray,
+                           i_input: jnp.ndarray,
+                           params: Dict[str, jnp.ndarray],
+@@ -130,7 +169,7 @@ def vectorized_lif_dynamics(v: jnp.ndarray,
+     
+     return v_new, spike_mask
+ 
+-@jit
++# @jit  # Temporarily disabled to fix hanging import
+ def batch_stdp_update(pre_indices: jnp.ndarray,
+                      post_indices: jnp.ndarray,
+                      weights: jnp.ndarray,
+@@ -167,7 +206,7 @@ def batch_stdp_update(pre_indices: jnp.ndarray,
+     
+     return new_weights
+ 
+-@jit
++# @jit  # Temporarily disabled to fix hanging import
+ def compute_network_states(states: Dict[str, jnp.ndarray],
+                          inputs: jnp.ndarray,
+                          params: Dict[str, Any]) -> Dict[str, jnp.ndarray]:
+@@ -226,7 +265,7 @@ def compute_network_states(states: Dict[str, jnp.ndarray],
+     }
+ 
+ # Multi-GPU batch processing for maximum throughput
+-@partial(jit, static_argnums=(2,))
++# @partial(jit, static_argnums=(2,))  # Temporarily disabled to fix hanging import
+ def batch_process_patterns(patterns: jnp.ndarray,
+                          network_params: Dict[str, Any],
+                          n_steps: int) -> Dict[str, jnp.ndarray]:
+@@ -346,6 +385,9 @@ class HebSNN:
+         self.batch_size = batch_size
+         self.mixed_precision = mixed_precision
+         
++        # Initialize neuromodulator bus
++        self.modulators = Modulators()
++        
+         # Set up precision (use float32 for better GPU performance)
+         self.dtype = jnp.float32
+         
+@@ -520,16 +562,21 @@ class HebSNN:
+         self.spike_history = []
+         self.baseline_activity = jnp.zeros(self.n_neurons, dtype=self.dtype)
+     
+-    def step(self, inputs: jnp.ndarray, dt: float = 1.0) -> Tuple[jnp.ndarray, float]:
++    def step(self, inputs: jnp.ndarray, dt: float = 1.0, modulators: Optional[Modulators] = None) -> Tuple[jnp.ndarray, float]:
+         """
+-        High-performance single step execution.
++        High-performance single step execution with neuromodulator support.
+         """
+-        # Prepare parameters
++        # Use provided modulators or default to network's modulators
++        if modulators is None:
++            modulators = self.modulators
++            
++        # Prepare parameters with modulator values
+         params = {
+             **self.neuron_params,
+             **self.learning_params,
+             'current_time': self.current_time,
+-            'dt': dt
++            'dt': dt,
++            'modulators': modulators.to_dict()
+         }
+         
+         # Sparse input propagation
